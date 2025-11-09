@@ -472,10 +472,10 @@ function App() {
         </div>
       )}
 
-      {/* YouTube Warning */}
-      <div className="warning-message">
-        <strong>📺 Video Compatibility:</strong> YouTube videos cannot be used due to embedding restrictions. 
-        Please use direct MP4 video URLs or try the sample videos provided in the player.
+      {/* YouTube Info */}
+      <div className="warning-message" style={{ background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }}>
+        <strong>📺 Video Support:</strong> You can now watch YouTube videos together! 
+        Simply paste any YouTube URL in the video player. Direct MP4 videos are also supported.
       </div>
       
       {/* Status Bar */}
