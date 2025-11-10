@@ -1,11 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
-import { QRCodeSVG } from 'qrcode.react';
 import { useTheme } from './contexts/ThemeContext';
 import VideoPlayer from './components/VideoPlayer';
 import RoomControls from './components/RoomControls';
 import VoiceChat from './components/VoiceChat';
-import TextChat from './components/TextChat';
 import Reactions from './components/Reactions';
 
 const SOCKET_SERVER_URL = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
@@ -21,10 +19,10 @@ function App() {
   const [userId, setUserId] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
-  const [showQRCode, setShowQRCode] = useState(false);
   const [roomTimer, setRoomTimer] = useState(null);
   const [timerSeconds, setTimerSeconds] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(false);
+  const [pendingRoomFromUrl, setPendingRoomFromUrl] = useState(null);
   const videoPlayerRef = useRef();
 
   useEffect(() => {
@@ -61,8 +59,14 @@ function App() {
           console.log('Reconnecting to room:', roomToJoin);
           setStatus('Reconnecting to room...');
           
-          // Rejoin the room
-          newSocket.emit('join_room', roomToJoin, (response) => {
+          // Rejoin the room with saved username
+          const savedUsername = localStorage.getItem('watchParty_username') || '';
+          // If no saved username or it's still "Guest-", don't auto-rejoin
+          if (!savedUsername || savedUsername.trim() === '' || savedUsername.startsWith('Guest-')) {
+            setStatus('Connected to server! Please enter your name to join a room.');
+            return;
+          }
+          newSocket.emit('join_room', roomToJoin, { username: savedUsername.trim() }, (response) => {
             if (response.success) {
               setRoomId(roomToJoin);
               setRoomData(response.room);
@@ -90,22 +94,12 @@ function App() {
           setStatus('Connected to server! Ready to create or join a room.');
         }
       } else if (urlRoomId && !savedRoomData) {
-        // Try to join room from URL if we don't have saved data
-        console.log('Joining room from URL:', urlRoomId);
-        setStatus('Joining room from link...');
-        newSocket.emit('join_room', urlRoomId, (response) => {
-          if (response.success) {
-            setRoomId(urlRoomId);
-            setRoomData(response.room);
-            setUsers(response.room.users?.filter(u => u.userId !== newSocket.id) || []);
-            setStatus(`🎉 Joined room: ${response.room.name || urlRoomId}`);
-            localStorage.setItem('watchParty_roomId', urlRoomId);
-            localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
-            window.history.replaceState({}, '', window.location.pathname);
-          } else {
-            setStatus('Connected to server! Ready to create or join a room.');
-          }
-        });
+        // Store room ID from URL to show name popup
+        console.log('Room ID from URL:', urlRoomId);
+        setPendingRoomFromUrl(urlRoomId);
+        setStatus('Please enter your name to join the room');
+        // Clean URL immediately
+        window.history.replaceState({}, '', window.location.pathname);
       } else {
         setStatus('Connected to server! Ready to create or join a room.');
       }
@@ -177,16 +171,23 @@ function App() {
     }
   }, [roomId, roomData]);
 
-  const createRoom = (roomName) => {
+  const createRoom = (roomName, username) => {
     if (!socket) return;
     
+    // Ensure username is provided and not empty
+    if (!username || username.trim() === '' || username.startsWith('Guest-')) {
+      alert('Please enter your name before creating a room');
+      return;
+    }
+    
     setStatus('Creating room...');
-    socket.emit('create_room', { roomName }, (response) => {
+    socket.emit('create_room', { roomName, username: username.trim() }, (response) => {
       if (response.success) {
         setRoomId(response.roomId);
         setRoomData(response.room);
         setUsers(response.room.users?.filter(u => u.userId !== socket.id) || []);
-        setStatus(`🎉 Room created! Share this code with friends: ${response.roomId}`);
+        const savedUsername = localStorage.getItem('watchParty_username') || 'You';
+        setStatus(`🎉 Room created by ${savedUsername}! Share this code with friends: ${response.roomId}`);
         
         // Save room data to localStorage
         localStorage.setItem('watchParty_roomId', response.roomId);
@@ -197,11 +198,17 @@ function App() {
     });
   };
 
-  const joinRoom = (targetRoomId) => {
+  const joinRoom = (targetRoomId, username) => {
     if (!socket || !targetRoomId.trim()) return;
     
+    // Ensure username is provided and not empty
+    if (!username || username.trim() === '' || username.startsWith('Guest-')) {
+      alert('Please enter your name before joining the room');
+      return;
+    }
+    
     setStatus('Joining room...');
-    socket.emit('join_room', targetRoomId.trim(), (response) => {
+    socket.emit('join_room', targetRoomId.trim(), { username: username.trim() }, (response) => {
       if (response.success) {
         setRoomId(targetRoomId.trim());
         setRoomData(response.room);
@@ -219,6 +226,11 @@ function App() {
 
   const leaveRoom = () => {
     if (window.confirm('Are you sure you want to leave this room?')) {
+      // Notify server that we're leaving
+      if (socket && roomId) {
+        socket.emit('leave_room', { roomId });
+      }
+      
       setRoomId('');
       setRoomData(null);
       setUsers([]);
@@ -230,7 +242,7 @@ function App() {
       
       // Refresh to clean up all connections
       setTimeout(() => window.location.reload(), 1000);
-    }
+    }                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          
   };
 
   const getConnectionStatus = () => {
@@ -361,14 +373,16 @@ function App() {
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
-        marginBottom: '30px',
-        padding: '24px 30px',
-        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        borderRadius: '20px',
-        boxShadow: '0 10px 30px rgba(102, 126, 234, 0.4)',
+        marginBottom: '32px',
+        padding: '28px 36px',
+        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%)',
+        borderRadius: '24px',
+        boxShadow: 
+          '0 20px 60px rgba(102, 126, 234, 0.4), 0 0 40px rgba(139, 92, 246, 0.3)',
         color: 'white',
         position: 'relative',
-        overflow: 'hidden'
+        overflow: 'hidden',
+        border: '1px solid rgba(255, 255, 255, 0.1)'
       }}>
         <div style={{ position: 'relative', zIndex: 1 }}>
           <h1 style={{ 
@@ -512,17 +526,6 @@ function App() {
                 {linkCopied ? '✅ Copied!' : '🔗 Copy Link'}
               </button>
               <button 
-                onClick={() => setShowQRCode(!showQRCode)}
-                className="btn-info"
-                style={{ 
-                  padding: '5px 12px',
-                  fontSize: '12px'
-                }}
-                title="Show QR code"
-              >
-                {showQRCode ? '📱 Hide QR' : '📱 QR Code'}
-              </button>
-              <button 
                 onClick={leaveRoom}
                 className="btn-danger"
                 style={{ 
@@ -541,126 +544,7 @@ function App() {
             <strong>Room:</strong> {roomData.name}
           </div>
         )}
-        
-        {/* QR Code Display */}
-        {roomId && showQRCode && (
-          <div style={{ 
-            marginTop: '15px', 
-            padding: '15px', 
-            background: '#2a2a2a', 
-            borderRadius: '8px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: '10px'
-          }}>
-            <div style={{ color: '#fff', fontWeight: 'bold', marginBottom: '5px' }}>
-              📱 Scan to Join Room
-            </div>
-            <div style={{ 
-              background: 'white', 
-              padding: '10px', 
-              borderRadius: '8px',
-              display: 'flex',
-              justifyContent: 'center',
-              alignItems: 'center'
-            }}>
-              <QRCodeSVG 
-                value={getRoomLink()} 
-                size={150}
-                level="M"
-                includeMargin={true}
-              />
-            </div>
-            <div style={{ fontSize: '11px', color: '#999', textAlign: 'center', maxWidth: '200px' }}>
-              Share this QR code with friends to join instantly!
-            </div>
-            <div style={{ 
-              fontSize: '10px', 
-              color: '#666', 
-              wordBreak: 'break-all',
-              textAlign: 'center',
-              maxWidth: '200px'
-            }}>
-              {getRoomLink()}
-            </div>
-          </div>
-        )}
 
-        {/* Room Timer */}
-        {roomId && (
-          <div style={{ 
-            marginTop: '15px', 
-            padding: '15px', 
-            background: isTimerRunning ? '#2d5016' : '#2a2a2a', 
-            borderRadius: '8px',
-            border: isTimerRunning ? '2px solid #28a745' : '1px solid #444'
-          }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-              <div>
-                <h4 style={{ margin: '0 0 10px 0', color: '#fff' }}>⏰ Room Timer</h4>
-                {isTimerRunning ? (
-                  <div style={{ fontSize: '32px', fontWeight: 'bold', color: '#28a745', fontFamily: 'monospace' }}>
-                    {formatTime(timerSeconds)}
-                  </div>
-                ) : (
-                  <div style={{ fontSize: '14px', color: '#999' }}>
-                    No timer active
-                  </div>
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                {!isTimerRunning ? (
-                  <>
-                    <button
-                      onClick={() => startTimer(1)}
-                      className="btn-success"
-                      style={{ padding: '6px 12px', fontSize: '12px' }}
-                    >
-                      Start 1 min
-                    </button>
-                    <button
-                      onClick={() => startTimer(5)}
-                      className="btn-success"
-                      style={{ padding: '6px 12px', fontSize: '12px' }}
-                    >
-                      Start 5 min
-                    </button>
-                    <button
-                      onClick={() => startTimer(10)}
-                      className="btn-success"
-                      style={{ padding: '6px 12px', fontSize: '12px' }}
-                    >
-                      Start 10 min
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    onClick={stopTimer}
-                    className="btn-danger"
-                    style={{ padding: '6px 12px', fontSize: '12px' }}
-                  >
-                    Stop Timer
-                  </button>
-                )}
-              </div>
-            </div>
-            {isTimerRunning && timerSeconds <= 10 && (
-              <div style={{ 
-                marginTop: '10px', 
-                padding: '8px', 
-                background: '#dc3545', 
-                borderRadius: '4px',
-                color: '#fff',
-                textAlign: 'center',
-                fontWeight: 'bold',
-                animation: 'pulse 1s infinite'
-              }}>
-                ⚠️ Timer ending soon!
-              </div>
-            )}
-          </div>
-        )}
       </div>
 
       {!roomId ? (
@@ -669,107 +553,190 @@ function App() {
           onCreateRoom={createRoom}
           onJoinRoom={joinRoom}
           disabled={!isConnected}
+          pendingRoomFromUrl={pendingRoomFromUrl}
+          onPendingRoomHandled={() => setPendingRoomFromUrl(null)}
         />
       ) : (
-        /* Main Room Interface */
-        <>
-          {/* Users in Room */}
-          <div className="component-card" style={{ marginBottom: '20px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-              <h3>👥 Users in Room ({users.length + 1})</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                <div style={{ fontSize: '12px', color: '#ccc' }}>
-                  Room Code: <strong style={{ color: '#fff' }}>{roomId}</strong>
+        /* Main Room Interface - Professional Dashboard Layout */
+        <div className="dashboard-layout">
+          {/* Left Sidebar - Users & Timer */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            {/* Users Card */}
+            <div className="component-card" style={{ marginBottom: 0 }}>
+              <h3 style={{ margin: '0 0 20px 0', fontSize: '20px' }}>
+                👥 Participants ({users.length + 1})
+              </h3>
+              <div className="user-list" style={{ flexDirection: 'column', gap: '8px' }}>
+                <div style={{ 
+                  padding: '10px 12px',
+                  background: roomData?.host === userId ? 
+                    'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' :
+                    'linear-gradient(135deg, rgba(0, 123, 255, 0.2), rgba(0, 86, 179, 0.2))',
+                  borderRadius: '8px',
+                  border: '1px solid',
+                  borderColor: roomData?.host === userId ? '#ffc107' : '#007bff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  position: 'relative'
+                }}>
+                  <span style={{
+                    width: '10px',
+                    height: '10px',
+                    background: '#28a745',
+                    borderRadius: '50%',
+                    border: '2px solid white',
+                    boxShadow: '0 0 0 2px var(--bg-secondary)'
+                  }}></span>
+                  <span style={{ flex: 1, fontWeight: '600', fontSize: '14px' }}>
+                    You {roomData?.host === userId && '👑'}
+                  </span>
+                  {roomData?.host === userId && (
+                    <span style={{ fontSize: '12px', color: '#ffc107' }}>HOST</span>
+                  )}
                 </div>
-                <button 
-                  onClick={copyRoomLink}
-                  className="btn-success"
-                  style={{ 
-                    padding: '4px 10px',
-                    fontSize: '11px',
+                {users.map(user => (
+                  <div key={user.userId} style={{ 
+                    padding: '10px 12px',
+                    background: user.isHost ? 
+                      'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' :
+                      'linear-gradient(135deg, rgba(40, 167, 69, 0.2), rgba(32, 201, 151, 0.2))',
+                    borderRadius: '8px',
+                    border: '1px solid',
+                    borderColor: user.isHost ? '#ffc107' : '#28a745',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '4px'
-                  }}
-                  title="Copy room link to share"
-                >
-                  {linkCopied ? '✅ Copied!' : '🔗 Copy Link'}
-                </button>
-                <button 
-                  onClick={() => setShowQRCode(!showQRCode)}
-                  className="btn-info"
-                  style={{ 
-                    padding: '4px 10px',
-                    fontSize: '11px'
-                  }}
-                  title="Show QR code for mobile"
-                >
-                  {showQRCode ? '📱 Hide' : '📱 QR'}
-                </button>
+                    gap: '8px'
+                  }}>
+                    <span style={{
+                      width: '10px',
+                      height: '10px',
+                      background: '#28a745',
+                      borderRadius: '50%',
+                      border: '2px solid white',
+                      boxShadow: '0 0 0 2px var(--bg-secondary)'
+                    }}></span>
+                    <span style={{ flex: 1, fontWeight: '600', fontSize: '14px' }}>
+                      {user.username} {user.isHost && '👑'}
+                    </span>
+                    {user.isHost && (
+                      <span style={{ fontSize: '12px', color: '#ffc107' }}>HOST</span>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
-            <div className="user-list">
-              <span className="user-badge" style={{ 
-                background: roomData?.host === userId ? 
-                  'linear-gradient(135deg, #ffc107, #e0a800)' :
-                  'linear-gradient(135deg, #007bff, #0056b3)',
-                position: 'relative'
+
+            {/* Room Timer Card */}
+            {roomId && (
+              <div className="component-card" style={{ 
+                marginBottom: 0,
+                background: isTimerRunning ? 'linear-gradient(135deg, rgba(40, 167, 69, 0.15), rgba(32, 201, 151, 0.15))' : 'var(--bg-secondary)',
+                border: isTimerRunning ? '2px solid #28a745' : '1px solid var(--border-color)'
               }}>
-                You ({userId?.substring(0, 8)}) {roomData?.host === userId && '👑 HOST'}
-                <span style={{
-                  position: 'absolute',
-                  top: '-5px',
-                  right: '-5px',
-                  background: '#28a745',
-                  borderRadius: '50%',
-                  width: '12px',
-                  height: '12px',
-                  border: '2px solid white'
-                }}></span>
-              </span>
-              {users.map(user => (
-                <span key={user.userId} className="user-badge" style={{
-                  background: user.isHost ? 
-                    'linear-gradient(135deg, #ffc107, #e0a800)' : 
-                    'linear-gradient(135deg, #28a745, #20c997)'
-                }}>
-                  {user.username} {user.isHost && '👑'}
-                </span>
-              ))}
-            </div>
+                <h3 style={{ margin: '0 0 20px 0', fontSize: '20px' }}>⏰ Timer</h3>
+                {isTimerRunning ? (
+                  <div style={{ 
+                    fontSize: '36px', 
+                    fontWeight: 'bold', 
+                    color: '#28a745', 
+                    fontFamily: 'monospace',
+                    textAlign: 'center',
+                    marginBottom: '16px',
+                    padding: '12px',
+                    background: 'var(--bg-tertiary)',
+                    borderRadius: '8px'
+                  }}>
+                    {formatTime(timerSeconds)}
+                  </div>
+                ) : (
+                  <div style={{ 
+                    fontSize: '14px', 
+                    color: 'var(--text-muted)',
+                    textAlign: 'center',
+                    marginBottom: '16px',
+                    padding: '12px',
+                    background: 'var(--bg-tertiary)',
+                    borderRadius: '8px'
+                  }}>
+                    No timer active
+                  </div>
+                )}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {!isTimerRunning ? (
+                    <>
+                      <button
+                        onClick={() => startTimer(1)}
+                        className="btn-success"
+                        style={{ width: '100%', padding: '10px', fontSize: '13px' }}
+                      >
+                        Start 1 min
+                      </button>
+                      <button
+                        onClick={() => startTimer(5)}
+                        className="btn-success"
+                        style={{ width: '100%', padding: '10px', fontSize: '13px' }}
+                      >
+                        Start 5 min
+                      </button>
+                      <button
+                        onClick={() => startTimer(10)}
+                        className="btn-success"
+                        style={{ width: '100%', padding: '10px', fontSize: '13px' }}
+                      >
+                        Start 10 min
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={stopTimer}
+                      className="btn-danger"
+                      style={{ width: '100%', padding: '10px', fontSize: '13px' }}
+                    >
+                      Stop Timer
+                    </button>
+                  )}
+                </div>
+                {isTimerRunning && timerSeconds <= 10 && (
+                  <div style={{ 
+                    marginTop: '12px', 
+                    padding: '10px', 
+                    background: '#dc3545', 
+                    borderRadius: '8px',
+                    color: '#fff',
+                    textAlign: 'center',
+                    fontWeight: 'bold',
+                    fontSize: '13px',
+                    animation: 'pulse 1s infinite'
+                  }}>
+                    ⚠️ Timer ending soon!
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* Main Content Grid */}
-          <div className="grid-2">
-            {/* Left Column - Video and Controls */}
-            <div>
-              <VoiceChat 
-                socket={socket}
-                roomId={roomId}
-                currentUser={userId}
-                users={users.map(u => u.userId)}
-              />
-              
-              <VideoPlayer
-                ref={videoPlayerRef}
-                socket={socket}
-                roomId={roomId}
-                currentUser={userId}
-                initialVideo={roomData?.currentVideo}
-                isHost={roomData?.host === userId}
-                room={roomData}
-              />
-            </div>
-            
-            {/* Right Column - Chat */}
-            <div>
-              <TextChat
-                socket={socket}
-                roomId={roomId}
-                currentUser={userId}
-                messages={roomData?.messages || []}
-              />
-            </div>
+          {/* Center Column - Video Player (Main Focus) */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            <VideoPlayer
+              ref={videoPlayerRef}
+              socket={socket}
+              roomId={roomId}
+              currentUser={userId}
+              initialVideo={roomData?.currentVideo}
+              isHost={roomData?.host === userId}
+              room={roomData}
+            />
+          </div>
+
+          {/* Right Sidebar - Voice Chat */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+            <VoiceChat 
+              socket={socket}
+              roomId={roomId}
+              currentUser={userId}
+              users={users.map(u => u.userId)}
+            />
           </div>
           
           {/* Reactions Overlay */}
@@ -777,7 +744,7 @@ function App() {
             socket={socket}
             roomId={roomId}
           />
-        </>
+        </div>
       )}
 
       {/* Footer */}

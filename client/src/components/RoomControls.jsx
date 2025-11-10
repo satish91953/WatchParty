@@ -1,18 +1,75 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
-function RoomControls({ onCreateRoom, onJoinRoom, disabled }) {
+function RoomControls({ onCreateRoom, onJoinRoom, disabled, pendingRoomFromUrl, onPendingRoomHandled }) {
   const [joinRoomId, setJoinRoomId] = useState('');
   const [roomName, setRoomName] = useState('');
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [modalUsername, setModalUsername] = useState('');
+  const [pendingAction, setPendingAction] = useState(null); // 'create' or 'join'
+  
+  // Show name modal automatically if there's a pending room from URL
+  useEffect(() => {
+    if (pendingRoomFromUrl && !showNameModal) {
+      setPendingAction('join');
+      setJoinRoomId(pendingRoomFromUrl);
+      setShowNameModal(true);
+    }
+  }, [pendingRoomFromUrl, showNameModal]);
 
   const handleCreateRoom = (e) => {
     e.preventDefault();
-    onCreateRoom(roomName.trim() || 'My Watch Party');
+    // Always show name modal
+    setPendingAction('create');
+    setShowNameModal(true);
   };
 
   const handleJoinRoom = (e) => {
     e.preventDefault();
-    if (joinRoomId.trim()) {
-      onJoinRoom(joinRoomId.trim());
+    if (!joinRoomId.trim()) {
+      alert('Please enter a room code');
+      return;
+    }
+    // Show name modal
+    setPendingAction('join');
+    setShowNameModal(true);
+  };
+
+  const handleNameSubmit = () => {
+    const trimmedUsername = modalUsername.trim();
+    if (!trimmedUsername || trimmedUsername.startsWith('Guest-')) {
+      alert('Please enter your name (not "Guest-")');
+      return;
+    }
+    
+    // Save username to localStorage
+    localStorage.setItem('watchParty_username', trimmedUsername);
+    
+    // Close modal
+    setShowNameModal(false);
+    setModalUsername('');
+    
+    // Execute pending action
+    if (pendingAction === 'create') {
+      onCreateRoom(roomName.trim() || 'My Watch Party', trimmedUsername);
+    } else if (pendingAction === 'join') {
+      onJoinRoom(joinRoomId.trim(), trimmedUsername);
+      // Clear pending room from URL if it was from URL
+      if (pendingRoomFromUrl) {
+        onPendingRoomHandled();
+      }
+    }
+    
+    setPendingAction(null);
+  };
+
+  const handleNameCancel = () => {
+    setShowNameModal(false);
+    setModalUsername('');
+    setPendingAction(null);
+    // Clear pending room from URL if it was from URL
+    if (pendingRoomFromUrl) {
+      onPendingRoomHandled();
+      setJoinRoomId('');
     }
   };
 
@@ -266,6 +323,152 @@ function RoomControls({ onCreateRoom, onJoinRoom, disabled }) {
           ))}
         </div>
       </div>
+
+      {/* Name Input Modal */}
+      {showNameModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 10000,
+          backdropFilter: 'blur(4px)'
+        }}
+        onClick={handleNameCancel}
+        >
+          <div style={{
+            background: 'var(--bg-secondary)',
+            padding: '32px',
+            borderRadius: '20px',
+            border: '2px solid var(--border-color)',
+            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.5)',
+            maxWidth: '400px',
+            width: '90%',
+            position: 'relative',
+            zIndex: 10001
+          }}
+          onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{
+              margin: '0 0 20px 0',
+              fontSize: '24px',
+              fontWeight: '700',
+              color: 'var(--text-primary)',
+              textAlign: 'center',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '10px'
+            }}>
+              <span style={{ fontSize: '28px' }}>👤</span>
+              Enter Your Name
+            </h3>
+            <p style={{
+              margin: '0 0 20px 0',
+              fontSize: '14px',
+              color: 'var(--text-secondary)',
+              textAlign: 'center'
+            }}>
+              {pendingAction === 'create' 
+                ? 'Please enter your name to create a room' 
+                : 'Please enter your name to join the room'}
+            </p>
+            <input
+              type="text"
+              placeholder="Your name *"
+              value={modalUsername}
+              onChange={(e) => setModalUsername(e.target.value)}
+              onKeyPress={(e) => {
+                if (e.key === 'Enter') {
+                  handleNameSubmit();
+                }
+              }}
+              autoFocus
+              style={{
+                width: '100%',
+                padding: '14px 16px',
+                fontSize: '16px',
+                marginBottom: '20px',
+                borderRadius: '8px',
+                border: modalUsername.trim() && !modalUsername.trim().startsWith('Guest-')
+                  ? '2px solid #28a745'
+                  : '2px solid #dc3545',
+                background: 'var(--bg-tertiary)',
+                color: 'var(--text-primary)',
+                outline: 'none'
+              }}
+            />
+            <div style={{
+              display: 'flex',
+              gap: '12px'
+            }}>
+              <button
+                onClick={handleNameCancel}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  fontSize: '15px',
+                  fontWeight: '600',
+                  borderRadius: '8px',
+                  border: '2px solid var(--border-color)',
+                  background: 'var(--bg-tertiary)',
+                  color: 'var(--text-primary)',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = 'var(--bg-secondary)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = 'var(--bg-tertiary)';
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleNameSubmit}
+                disabled={!modalUsername.trim() || modalUsername.trim().startsWith('Guest-')}
+                style={{
+                  flex: 1,
+                  padding: '12px',
+                  fontSize: '15px',
+                  fontWeight: '700',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: pendingAction === 'create' 
+                    ? 'linear-gradient(135deg, #28a745, #20c997)'
+                    : 'linear-gradient(135deg, #007bff, #138496)',
+                  color: 'white',
+                  cursor: (!modalUsername.trim() || modalUsername.trim().startsWith('Guest-')) 
+                    ? 'not-allowed' 
+                    : 'pointer',
+                  opacity: (!modalUsername.trim() || modalUsername.trim().startsWith('Guest-')) 
+                    ? 0.6 
+                    : 1,
+                  transition: 'all 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  if (modalUsername.trim() && !modalUsername.trim().startsWith('Guest-')) {
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.3)';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = 'translateY(0)';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+              >
+                {pendingAction === 'create' ? '🚀 Create' : '🎭 Join'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

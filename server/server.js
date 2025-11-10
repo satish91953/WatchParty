@@ -111,6 +111,25 @@ io.on('connection', (socket) => {
     try {
       const roomId = generateRoomId();
       
+      // Require a username
+      let username = data.username || '';
+      
+      // Reject if username is empty or still has "Guest-" prefix
+      if (!username || username.trim() === '' || username.startsWith('Guest-')) {
+        callback({ 
+          success: false, 
+          message: 'Please provide your name before creating a room' 
+        });
+        return;
+      }
+      
+      username = username.trim();
+      
+      // Update active connection with the username
+      if (activeConnections.has(socket.id)) {
+        activeConnections.get(socket.id).username = username;
+      }
+      
       // Create room in database
       const room = new Room({
         roomId,
@@ -118,7 +137,7 @@ io.on('connection', (socket) => {
         host: socket.userId,
         users: [{
           userId: socket.userId,
-          username: socket.user.username,
+          username: username,
           isHost: true,
           hasVideo: false,
           hasAudio: false
@@ -130,11 +149,23 @@ io.on('connection', (socket) => {
       socket.join(roomId);
       activeConnections.get(socket.id).roomId = roomId;
       
-      console.log(`Room ${roomId} created by ${socket.user.username}`);
+      // Get currently active users (should only be the creator)
+      const activeUsersInRoom = Array.from(activeConnections.values())
+        .filter(conn => conn.roomId === roomId)
+        .map(conn => ({
+          userId: conn.userId,
+          username: conn.username
+        }));
+      
+      // Return room with only active users
+      const roomData = room.toObject();
+      roomData.users = activeUsersInRoom;
+      
+      console.log(`Room ${roomId} created by ${username}`);
       callback({ 
         success: true, 
         roomId,
-        room: room.toObject()
+        room: roomData
       });
     } catch (error) {
       console.error('Error creating room:', error);
@@ -142,46 +173,174 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('join_room', async (roomId, callback) => {
+  socket.on('join_room', async (roomId, data, callback) => {
     try {
-      const room = await Room.findOne({ roomId, isActive: true });
+      // Handle both old format (roomId, callback) and new format (roomId, {username}, callback)
+      let username, actualCallback;
+      if (typeof data === 'function') {
+        // Old format: (roomId, callback) - reject it, require username
+        actualCallback = data;
+        if (actualCallback) {
+          actualCallback({ 
+            success: false, 
+            message: 'Please provide your name before joining the room' 
+          });
+        }
+        return;
+      } else {
+        // New format: (roomId, {username}, callback)
+        username = data?.username || '';
+        actualCallback = callback;
+      }
       
-      if (!room) {
-        callback({ success: false, message: 'Room not found or inactive' });
+      // Require a username - reject if empty or still has "Guest-" prefix
+      if (!username || username.trim() === '' || username.startsWith('Guest-')) {
+        if (actualCallback) {
+          actualCallback({ 
+            success: false, 
+            message: 'Please provide your name before joining the room' 
+          });
+        }
         return;
       }
       
-      // Add user to room if not already there
-      const existingUser = room.users.find(u => u.userId === socket.userId);
-      if (!existingUser) {
-        room.users.push({
-          userId: socket.userId,
-          username: socket.user.username,
-          isHost: false,
-          hasVideo: false,
-          hasAudio: false
-        });
-        await room.save();
+      username = username.trim();
+      
+      const room = await Room.findOne({ roomId, isActive: true });
+      
+      if (!room) {
+        if (actualCallback) actualCallback({ success: false, message: 'Room not found or inactive' });
+        return;
+      }
+      
+      // Update active connection with the username
+      if (activeConnections.has(socket.id)) {
+        activeConnections.get(socket.id).username = username;
       }
       
       socket.join(roomId);
       activeConnections.get(socket.id).roomId = roomId;
       
+      // Get currently active users in this room from activeConnections
+      const activeUsersInRoom = Array.from(activeConnections.values())
+        .filter(conn => conn.roomId === roomId)
+        .map(conn => ({
+          userId: conn.userId,
+          username: conn.username
+        }));
+      
+      // Update room.users to match active connections using findOneAndUpdate to avoid version conflicts
+      await Room.findOneAndUpdate(
+        { roomId },
+        {
+          $set: {
+            users: activeUsersInRoom.map(user => ({
+              userId: user.userId,
+              username: user.username,
+              isHost: user.userId === room.host,
+              hasVideo: false,
+              hasAudio: false
+            }))
+          }
+        },
+        { new: true } // Return updated document
+      );
+      
+      // Fetch the updated room for response
+      const updatedRoom = await Room.findOne({ roomId });
+      
       // Notify existing users
       socket.to(roomId).emit('user_joined', {
+        userId: socket.userId,
+        username: username
+      });
+      
+      // Return room with only active users
+      const roomData = updatedRoom ? updatedRoom.toObject() : room.toObject();
+      roomData.users = activeUsersInRoom;
+      
+      if (actualCallback) {
+        actualCallback({ 
+          success: true, 
+          room: roomData
+        });
+      }
+      
+      console.log(`User ${username} joined room ${roomId}`);
+    } catch (error) {
+      console.error('Error joining room:', error);
+      if (typeof data === 'function') {
+        data({ success: false, message: 'Failed to join room' });
+      } else if (callback) {
+        callback({ success: false, message: 'Failed to join room' });
+      }
+    }
+  });
+
+  socket.on('leave_room', async (data) => {
+    try {
+      const connection = activeConnections.get(socket.id);
+      const roomId = data?.roomId || (connection ? connection.roomId : null);
+      
+      if (!roomId) {
+        console.warn(`User ${socket.userId} tried to leave but no roomId found`);
+        return;
+      }
+      
+      // Remove user from voice chat users
+      if (global.voiceChatUsers && global.voiceChatUsers.has(roomId)) {
+        global.voiceChatUsers.get(roomId).delete(socket.id);
+        if (global.voiceChatUsers.get(roomId).size === 0) {
+          global.voiceChatUsers.delete(roomId);
+        }
+      }
+      
+      // Get currently active users in this room (excluding the leaving user)
+      const activeUsersInRoom = Array.from(activeConnections.values())
+        .filter(conn => conn.roomId === roomId && conn.userId !== socket.userId)
+        .map(conn => ({
+          userId: conn.userId,
+          username: conn.username
+        }));
+      
+      // Update room.users to match active connections (remove leaving user) using findOneAndUpdate to avoid version conflicts
+      if (roomId) {
+        const room = await Room.findOne({ roomId });
+        if (room) {
+          await Room.findOneAndUpdate(
+            { roomId },
+            {
+              $set: {
+                users: activeUsersInRoom.map(user => ({
+                  userId: user.userId,
+                  username: user.username,
+                  isHost: user.userId === room.host,
+                  hasVideo: false,
+                  hasAudio: false
+                }))
+              }
+            }
+          );
+        }
+      }
+      
+      // Leave the socket room
+      socket.leave(roomId);
+      
+      // Clear room from active connection
+      if (connection) {
+        connection.roomId = null;
+      }
+      
+      // Notify others in the room
+      socket.to(roomId).emit('user_left', {
         userId: socket.userId,
         username: socket.user.username
       });
       
-      callback({ 
-        success: true, 
-        room: room.toObject()
-      });
-      
-      console.log(`User ${socket.user.username} joined room ${roomId}`);
+      console.log(`User ${socket.user.username} left room ${roomId}`);
     } catch (error) {
-      console.error('Error joining room:', error);
-      callback({ success: false, message: 'Failed to join room' });
+      console.error('Error leaving room:', error);
     }
   });
 
@@ -366,6 +525,23 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Handle signal retry requests (when peer connection fails)
+  socket.on('request_voice_signal', (payload) => {
+    const connection = activeConnections.get(socket.id);
+    const roomId = payload.roomId || (connection ? connection.roomId : null);
+    if (!roomId) return;
+    
+    // Check if requested user is in voice chat
+    if (global.voiceChatUsers.has(roomId) && 
+        global.voiceChatUsers.get(roomId).has(payload.userId)) {
+      // Notify the requested user to send their signal again
+      io.to(payload.userId).emit('retry_voice_connection', {
+        requestingUserId: socket.id,
+        roomId
+      });
+    }
+  });
+
   // ============= Screen Sharing =============
   
   socket.on('start_screen_share', (data) => {
@@ -460,27 +636,64 @@ io.on('connection', (socket) => {
   // ============= Chat =============
   
   socket.on('chat_message', async (data) => {
-    const message = {
-      sender: socket.user.username,
-      message: data.message,
-      timestamp: Date.now()
-    };
-    
-    socket.to(data.roomId).emit('chat_message', message);
-    
-    // Save to database
-    await Room.findOneAndUpdate(
-      { roomId: data.roomId },
-      { 
-        $push: { 
-          messages: {
-            sender: socket.user.username,
-            message: data.message,
-            timestamp: Date.now()
+    try {
+      // Validate data
+      if (!data || !data.roomId || !data.message || !data.message.trim()) {
+        console.warn('Invalid chat message data:', data);
+        return;
+      }
+
+      const connection = activeConnections.get(socket.id);
+      const roomId = data.roomId || (connection ? connection.roomId : null);
+      
+      if (!roomId) {
+        console.warn(`User ${socket.id} tried to send chat message but no roomId found`);
+        return;
+      }
+
+      // Verify user is in the room
+      const room = await Room.findOne({ roomId, isActive: true });
+      if (!room) {
+        console.warn(`Chat message sent to non-existent room: ${roomId}`);
+        return;
+      }
+
+      // Get the actual username from activeConnections (not socket.user which might be "Guest-")
+      const senderUsername = connection?.username || socket.user.username;
+      
+      // Make sure we don't use "Guest-" names
+      if (!senderUsername || senderUsername.startsWith('Guest-')) {
+        console.warn(`User ${socket.id} tried to send chat message but has invalid username: ${senderUsername}`);
+        return;
+      }
+
+      const message = {
+        sender: senderUsername,
+        message: data.message.trim(),
+        timestamp: Date.now()
+      };
+      
+      // Broadcast to all users in the room (including sender for consistency)
+      io.to(roomId).emit('chat_message', message);
+      
+      console.log(`Chat message from ${senderUsername} in room ${roomId}: ${data.message.substring(0, 50)}...`);
+      
+      // Save to database
+      await Room.findOneAndUpdate(
+        { roomId },
+        { 
+          $push: { 
+            messages: {
+              sender: senderUsername,
+              message: data.message.trim(),
+              timestamp: Date.now()
+            }
           }
         }
-      }
-    );
+      );
+    } catch (error) {
+      console.error('Error handling chat message:', error);
+    }
   });
 
   // ============= Disconnect =============
@@ -498,15 +711,34 @@ io.on('connection', (socket) => {
         }
       }
       
-      // Remove user from room in database
-      await Room.findOneAndUpdate(
-        { roomId: connection.roomId },
-        { 
-          $pull: { 
-            users: { userId: socket.userId }
-          }
+      // Get currently active users in this room (excluding the disconnecting user)
+      const activeUsersInRoom = Array.from(activeConnections.values())
+        .filter(conn => conn.roomId === connection.roomId && conn.userId !== socket.userId)
+        .map(conn => ({
+          userId: conn.userId,
+          username: conn.username
+        }));
+      
+      // Update room.users to match active connections (remove disconnected user) using findOneAndUpdate to avoid version conflicts
+      if (connection.roomId) {
+        const room = await Room.findOne({ roomId: connection.roomId });
+        if (room) {
+          await Room.findOneAndUpdate(
+            { roomId: connection.roomId },
+            {
+              $set: {
+                users: activeUsersInRoom.map(user => ({
+                  userId: user.userId,
+                  username: user.username,
+                  isHost: user.userId === room.host,
+                  hasVideo: false,
+                  hasAudio: false
+                }))
+              }
+            }
+          );
         }
-      );
+      }
       
       // Notify others
       socket.to(connection.roomId).emit('user_left', {
@@ -705,14 +937,18 @@ app.post('/api/rooms/:roomId/upload-video', upload.single('video'), async (req, 
     console.log(`Video uploaded for room ${roomId}: ${videoTitle}`);
     
     // Notify all room members about the new video
-    io.to(roomId).emit('host_video_uploaded', {
+    const videoData = {
       videoUrl,
       videoTitle,
       filename: req.file.filename,
       size: req.file.size,
       format: videoFormat,
       uploadedBy: userId
-    });
+    };
+    
+    // Emit both events for backward compatibility
+    io.to(roomId).emit('video_uploaded', videoData);
+    io.to(roomId).emit('host_video_uploaded', videoData);
     
     res.json({
       success: true,
@@ -745,17 +981,23 @@ app.get('/api/rooms/:roomId/videos', async (req, res) => {
       const videoInLibrary = room.videoLibrary?.some(v => v.url === room.currentVideo.url);
       
       if (!videoInLibrary && room.videoLibrary) {
-        // Add current video to library if it's not there
-        room.videoLibrary.push({
-          url: room.currentVideo.url,
-          title: room.currentVideo.title || 'Unknown Video',
-          filename: room.currentVideo.filename || '',
-          size: room.currentVideo.size || 0,
-          format: room.currentVideo.format || 'mp4',
-          uploadedAt: room.currentVideo.uploadedAt || Date.now(),
-          uploadedBy: room.host
-        });
-        await room.save();
+        // Add current video to library if it's not there using findOneAndUpdate to avoid version conflicts
+        await Room.findOneAndUpdate(
+          { roomId },
+          {
+            $push: {
+              videoLibrary: {
+                url: room.currentVideo.url,
+                title: room.currentVideo.title || 'Unknown Video',
+                filename: room.currentVideo.filename || '',
+                size: room.currentVideo.size || 0,
+                format: room.currentVideo.format || 'mp4',
+                uploadedAt: room.currentVideo.uploadedAt || Date.now(),
+                uploadedBy: room.host
+              }
+            }
+          }
+        );
       }
     }
     
@@ -780,10 +1022,7 @@ app.post('/api/rooms/:roomId/select-video', async (req, res) => {
       return res.status(404).json({ message: 'Room not found' });
     }
     
-    if (room.host !== userId) {
-      return res.status(403).json({ message: 'Only the host can select videos' });
-    }
-    
+    // Any user can select videos from the library
     // Find video in library (flexible matching for URL variations)
     let video = room.videoLibrary.find(v => v.url === videoUrl);
     

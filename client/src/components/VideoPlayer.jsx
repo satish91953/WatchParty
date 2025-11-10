@@ -31,6 +31,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const isHostRef = useRef(false);
   const syncInProgress = useRef(false);
   const videoInitialized = useRef(false);
+  const lastSyncTimeRef = useRef(0);
+  const youtubeSyncIntervalRef = useRef(null);
 
   // Expose video ref to parent
   useImperativeHandle(ref, () => ({
@@ -134,29 +136,34 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             },
             onStateChange: (event) => {
               if (youtubeSyncInProgress.current) {
-                youtubeSyncInProgress.current = false;
                 return;
               }
               
               // YouTube player states: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (cued)
               if (event.data === window.YT.PlayerState.PLAYING) {
-                // Video started playing
+                // Video started playing - get time immediately
                 const currentTime = event.target.getCurrentTime();
                 if (socket && roomId && !syncInProgress.current) {
-                  socket.emit('video_play', {
-                    roomId,
-                    currentTime,
-                    initiatedBy: currentUser
+                  // Use requestAnimationFrame for immediate emission
+                  requestAnimationFrame(() => {
+                    socket.emit('video_play', {
+                      roomId,
+                      currentTime,
+                      initiatedBy: currentUser
+                    });
                   });
                 }
               } else if (event.data === window.YT.PlayerState.PAUSED) {
-                // Video paused
+                // Video paused - get time immediately
                 const currentTime = event.target.getCurrentTime();
                 if (socket && roomId && !syncInProgress.current) {
-                  socket.emit('video_pause', {
-                    roomId,
-                    currentTime,
-                    initiatedBy: currentUser
+                  // Use requestAnimationFrame for immediate emission
+                  requestAnimationFrame(() => {
+                    socket.emit('video_pause', {
+                      roomId,
+                      currentTime,
+                      initiatedBy: currentUser
+                    });
                   });
                 }
               }
@@ -325,7 +332,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   // Listen for socket events with improved logic
   useEffect(() => {
     if (!socket) return;
-    
+
     // Update dependency to include isYouTube
 
     const handleVideoPlay = (data) => {
@@ -333,7 +340,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       if (isYouTube && youtubePlayerRef.current) {
         const socketId = socket?.id;
         const isOwnEvent = data.initiatedBy === currentUser || data.socketId === socketId;
-        if (isOwnEvent && !syncInProgress.current) {
+        
+        // Skip periodic sync events from same user
+        if (data.isPeriodicSync && isOwnEvent) {
+          return;
+        }
+        
+        if (isOwnEvent && !syncInProgress.current && !data.isPeriodicSync) {
           return;
         }
         
@@ -344,20 +357,26 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         try {
           const currentTime = youtubePlayerRef.current.getCurrentTime();
           const targetTime = data.currentTime || currentTime;
+          const timeDiff = Math.abs(currentTime - targetTime);
           
-          // Seek to target time if needed
-          if (Math.abs(currentTime - targetTime) > 0.5) {
+          // Seek to target time if needed (reduced threshold for better sync)
+          if (timeDiff > 0.1) {
             youtubePlayerRef.current.seekTo(targetTime, true);
+            // Minimal wait for seek to complete before playing
+            setTimeout(() => {
+              youtubePlayerRef.current.playVideo();
+            }, 30);
+          } else {
+            // Play immediately if time is close enough
+            youtubePlayerRef.current.playVideo();
           }
           
-          // Play video
-          youtubePlayerRef.current.playVideo();
-          
+          // Reduced timeout for faster response
           setTimeout(() => {
             youtubeSyncInProgress.current = false;
             syncInProgress.current = false;
             setIsSyncing(false);
-          }, 2000);
+          }, 600);
         } catch (error) {
           console.error('Error syncing YouTube play:', error);
           youtubeSyncInProgress.current = false;
@@ -471,20 +490,26 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         try {
           const currentTime = youtubePlayerRef.current.getCurrentTime();
           const targetTime = data.currentTime || currentTime;
+          const timeDiff = Math.abs(currentTime - targetTime);
           
-          // Seek to target time if needed
-          if (Math.abs(currentTime - targetTime) > 0.5) {
+          // Seek to target time if needed (reduced threshold for better sync)
+          if (timeDiff > 0.1) {
             youtubePlayerRef.current.seekTo(targetTime, true);
+            // Minimal wait for seek to complete before pausing
+            setTimeout(() => {
+              youtubePlayerRef.current.pauseVideo();
+            }, 30);
+          } else {
+            // Pause immediately if time is close enough
+            youtubePlayerRef.current.pauseVideo();
           }
           
-          // Pause video
-          youtubePlayerRef.current.pauseVideo();
-          
+          // Reduced timeout for faster response
           setTimeout(() => {
             youtubeSyncInProgress.current = false;
             syncInProgress.current = false;
             setIsSyncing(false);
-          }, 2000);
+          }, 600);
         } catch (error) {
           console.error('Error syncing YouTube pause:', error);
           youtubeSyncInProgress.current = false;
@@ -546,16 +571,16 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           // Sync time first if needed (but don't wait for it)
           if (data.currentTime !== undefined) {
             const timeDiff = Math.abs(video.currentTime - data.currentTime);
-            if (timeDiff > 0.5) {
-              video.currentTime = data.currentTime;
+        if (timeDiff > 0.5) {
+          video.currentTime = data.currentTime;
               console.log('⏭️ Synced time to:', data.currentTime);
             }
-          }
-          
+        }
+        
           // CRITICAL: Force pause immediately - use multiple strategies
-          if (!video.paused) {
+        if (!video.paused) {
             // Strategy 1: Direct pause
-            video.pause();
+          video.pause();
             console.log('✅ Pause() called (attempt 1)');
             
             // Strategy 2: Use requestAnimationFrame for immediate execution
@@ -594,9 +619,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             }, 50);
           } else {
             console.log('✅ Video already paused');
-          }
-          
-        } catch (error) {
+        }
+        
+      } catch (error) {
           console.error('❌ Error pausing video:', error);
         }
       };
@@ -638,10 +663,23 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       // Handle YouTube player
       if (isYouTube && youtubePlayerRef.current) {
         try {
-          youtubePlayerRef.current.seekTo(data.currentTime, true);
-          console.log('⏭️ Synced YouTube seek to time:', data.currentTime);
+          const currentTime = youtubePlayerRef.current.getCurrentTime();
+          const targetTime = data.currentTime;
+          
+          // Only seek if there's a significant difference (reduced threshold)
+          if (Math.abs(currentTime - targetTime) > 0.1) {
+            youtubeSyncInProgress.current = true;
+            youtubePlayerRef.current.seekTo(targetTime, true);
+            console.log('⏭️ Synced YouTube seek to time:', targetTime);
+            
+            // Reset sync flag faster
+            setTimeout(() => {
+              youtubeSyncInProgress.current = false;
+            }, 500);
+          }
         } catch (error) {
           console.error('Error syncing YouTube seek:', error);
+          youtubeSyncInProgress.current = false;
         }
         return;
       }
@@ -686,13 +724,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       setVideoTitle(data.videoTitle || 'Remote Video');
     };
 
-    const handleHostVideoUploaded = (data) => {
-      console.log('🎬 Host uploaded a video:', data);
+    const handleVideoUploaded = (data) => {
+      console.log('🎬 User uploaded a video:', data);
       
       // Add to library
       setVideoLibrary(prev => [...prev, data]);
       
-      // Automatically load the host's video for all users
+      // Automatically load the uploaded video for all users
       setVideoUrl(data.videoUrl);
       setVideoTitle(data.videoTitle);
       setHostVideo(data);
@@ -700,14 +738,14 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       setPlayerError('');
       setPlayerReady(false);
       
-      // Show notification to guests
-      if (!isHost) {
-        alert(`🎬 Host uploaded a new video: ${data.videoTitle}`);
+      // Show notification to other users
+      if (data.uploadedBy !== currentUser) {
+        alert(`🎬 ${data.uploadedBy || 'Someone'} uploaded a new video: ${data.videoTitle}`);
       }
     };
 
     const handleVideoSelected = (data) => {
-      console.log('🎬 Host selected video:', data);
+      console.log('🎬 User selected video:', data);
       
       setVideoUrl(data.videoUrl);
       setVideoTitle(data.videoTitle);
@@ -716,8 +754,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       setPlayerError('');
       setPlayerReady(false);
       
-      if (!isHost) {
-        alert(`🎬 Host selected: ${data.videoTitle}`);
+      if (data.selectedBy !== currentUser) {
+        alert(`🎬 ${data.selectedBy || 'Someone'} selected: ${data.videoTitle}`);
       }
     };
 
@@ -745,7 +783,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     socket.on('video_pause', handleVideoPause);
     socket.on('video_seek', handleVideoSeek);
     socket.on('video_url_change', handleVideoUrlChange);
-    socket.on('host_video_uploaded', handleHostVideoUploaded);
+    socket.on('video_uploaded', handleVideoUploaded);
+    socket.on('host_video_uploaded', handleVideoUploaded); // Keep for backward compatibility
     socket.on('video_selected', handleVideoSelected);
     socket.on('video_speed_change', handleVideoSpeedChange);
 
@@ -754,11 +793,55 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       socket.off('video_pause', handleVideoPause);
       socket.off('video_seek', handleVideoSeek);
       socket.off('video_url_change', handleVideoUrlChange);
-      socket.off('host_video_uploaded', handleHostVideoUploaded);
+      socket.off('video_uploaded', handleVideoUploaded);
+      socket.off('host_video_uploaded', handleVideoUploaded);
       socket.off('video_selected', handleVideoSelected);
       socket.off('video_speed_change', handleVideoSpeedChange);
     };
   }, [socket, currentUser, isYouTube, roomId]);
+
+  // Periodic sync for YouTube videos to prevent drift
+  useEffect(() => {
+    if (!isYouTube || !youtubePlayerRef.current || !socket || !roomId) {
+      if (youtubeSyncIntervalRef.current) {
+        clearInterval(youtubeSyncIntervalRef.current);
+        youtubeSyncIntervalRef.current = null;
+      }
+      return;
+    }
+
+    // Sync every 2 seconds to prevent drift
+    youtubeSyncIntervalRef.current = setInterval(() => {
+      if (youtubeSyncInProgress.current || syncInProgress.current) {
+        return;
+      }
+
+      try {
+        const currentTime = youtubePlayerRef.current.getCurrentTime();
+        const playerState = youtubePlayerRef.current.getPlayerState();
+        
+        // Only sync if video is playing
+        if (playerState === window.YT.PlayerState.PLAYING) {
+          // Emit current time to keep others in sync
+          socket.emit('video_play', {
+            roomId,
+            currentTime,
+            initiatedBy: currentUser,
+            isPeriodicSync: true
+          });
+        }
+      } catch (error) {
+        console.error('Error in periodic YouTube sync:', error);
+      }
+    }, 2000);
+
+    return () => {
+      if (youtubeSyncIntervalRef.current) {
+        clearInterval(youtubeSyncIntervalRef.current);
+        youtubeSyncIntervalRef.current = null;
+      }
+    };
+  }, [isYouTube, socket, roomId, currentUser]);
 
   const getErrorMessage = (code) => {
     switch (code) {
@@ -866,13 +949,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       return;
     }
 
-    // If user is host, upload to server
-    if (isHost) {
-      await uploadVideoToServer(file);
-    } else {
-      // For non-hosts, use local blob (legacy behavior)
-      handleLocalFileUpload(file);
-    }
+    // Any user can upload to server - everyone gets access
+    await uploadVideoToServer(file);
     
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -1025,11 +1103,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   };
 
   const selectVideoFromLibrary = async (video) => {
-    if (!isHost) {
-      alert('Only the host can select videos');
-      return;
-    }
-    
+    // Any user can select videos from the library
     if (!video || !video.url) {
       setPlayerError('Invalid video data');
       console.error('Invalid video object:', video);
@@ -1161,40 +1235,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       {/* Player Status */}
       <div style={{ marginBottom: '20px' }}>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '15px', flexWrap: 'wrap' }}>
-          <span style={{ 
-            padding: '6px 12px', 
-            borderRadius: '6px', 
-            fontSize: '12px',
-            background: playerReady ? 'linear-gradient(135deg, #28a745, #20c997)' : '#6c757d',
-            color: 'white',
-            fontWeight: '500',
-            boxShadow: playerReady ? '0 2px 4px rgba(40, 167, 69, 0.3)' : 'none'
-          }}>
-            {playerReady ? '✅ Video Ready' : '⏳ Loading...'}
-          </span>
-          
-          <span style={{ 
-            padding: '6px 12px', 
-            borderRadius: '6px', 
-            fontSize: '12px',
-            background: isHost ? 'linear-gradient(135deg, #ffc107, #ff9800)' : 'linear-gradient(135deg, #17a2b8, #138496)',
-            color: isHost ? '#212529' : 'white',
-            fontWeight: '500'
-          }}>
-            {isHost ? '👑 Host' : '👥 Guest'}
-          </span>
-          
-          <span style={{ 
-            padding: '6px 12px', 
-            borderRadius: '6px', 
-            fontSize: '12px',
-            background: 'linear-gradient(135deg, #007bff, #0056b3)',
-            color: 'white',
-            fontWeight: '500'
-          }}>
-            🎮 Anyone Can Play/Pause
-          </span>
-          
           {isSyncing && (
             <span style={{ 
               padding: '6px 12px', 
@@ -1329,20 +1369,20 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             </div>
           </div>
         ) : (
-          <video
-            ref={videoRef}
-            controls
-            style={{
-              width: '100%',
-              height: 'auto',
-              minHeight: '300px',
-              display: 'block'
-            }}
-            preload="metadata"
-          >
-            <source src={videoUrl} type={getVideoType(videoUrl)} />
-            Your browser does not support the video tag.
-          </video>
+        <video
+          ref={videoRef}
+          controls
+          style={{
+            width: '100%',
+            height: 'auto',
+            minHeight: '300px',
+            display: 'block'
+          }}
+          preload="metadata"
+        >
+          <source src={videoUrl} type={getVideoType(videoUrl)} />
+          Your browser does not support the video tag.
+        </video>
         )}
       </div>
 
@@ -1410,6 +1450,126 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         </div>
       </div>
 
+      {/* Load URL Section */}
+      <div style={{ 
+        background: 'var(--bg-secondary)', 
+        padding: '20px', 
+        borderRadius: '12px',
+        marginBottom: '20px',
+        border: '1px solid var(--border-color)',
+        boxShadow: 'var(--shadow-sm)'
+      }}>
+        <div style={{ 
+          display: 'flex', 
+          alignItems: 'center', 
+          gap: '10px',
+          marginBottom: '15px'
+        }}>
+          <span style={{ fontSize: '18px' }}>🔗</span>
+          <strong style={{ color: 'var(--text-primary)', fontSize: '16px' }}>
+            Load Video URL:
+          </strong>
+        </div>
+        <div style={{ 
+          display: 'flex', 
+          gap: '10px', 
+          alignItems: 'flex-start',
+          flexWrap: 'wrap'
+        }}>
+          <input
+            type="text"
+            placeholder="Paste video URL (YouTube, MP4, etc.)"
+            value={newVideoUrl}
+            onChange={(e) => setNewVideoUrl(e.target.value)}
+            onKeyPress={(e) => {
+              if (e.key === 'Enter' && newVideoUrl.trim() && !isLoading) {
+                loadNewVideo();
+              }
+            }}
+            style={{ 
+              flex: 1,
+              minWidth: '250px',
+              padding: '12px 16px',
+              borderRadius: '8px',
+              border: '2px solid var(--border-color)',
+              background: 'var(--bg-tertiary)',
+              color: 'var(--text-primary)',
+              fontSize: '14px',
+              transition: 'all 0.3s ease'
+            }}
+            onFocus={(e) => {
+              e.target.style.borderColor = 'var(--accent-color)';
+              e.target.style.boxShadow = '0 0 0 3px rgba(99, 102, 241, 0.1)';
+            }}
+            onBlur={(e) => {
+              e.target.style.borderColor = 'var(--border-color)';
+              e.target.style.boxShadow = 'none';
+            }}
+          />
+          <button 
+            onClick={loadNewVideo}
+            disabled={!newVideoUrl.trim() || isLoading}
+            className={newVideoUrl.trim() && !isLoading ? 'btn-info' : ''}
+            style={{ 
+              padding: '12px 24px',
+              borderRadius: '8px',
+              fontSize: '14px',
+              fontWeight: '600',
+              cursor: newVideoUrl.trim() && !isLoading ? 'pointer' : 'not-allowed',
+              opacity: newVideoUrl.trim() && !isLoading ? 1 : 0.6,
+              transition: 'all 0.3s ease',
+              whiteSpace: 'nowrap',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}
+            title={isYouTubeUrl(newVideoUrl) ? 'Load YouTube video' : 'Load video from URL'}
+          >
+            {isLoading ? (
+              <>⏳ Loading...</>
+            ) : isYouTubeUrl(newVideoUrl) ? (
+              <>📺 Load YouTube</>
+            ) : (
+              <>🌐 Load URL</>
+            )}
+          </button>
+        </div>
+        {isYouTubeUrl(newVideoUrl) && (
+          <div style={{
+            marginTop: '12px',
+            padding: '10px 14px',
+            background: 'linear-gradient(135deg, rgba(255, 0, 0, 0.15), rgba(204, 0, 0, 0.1))',
+            border: '1px solid rgba(255, 0, 0, 0.3)',
+            borderRadius: '8px',
+            fontSize: '13px',
+            color: 'var(--text-primary)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <span>📺</span>
+            <span>YouTube video detected - will load in player</span>
+          </div>
+        )}
+        {newVideoUrl.trim() && !isYouTubeUrl(newVideoUrl) && !newVideoUrl.startsWith('http') && (
+          <div style={{
+            marginTop: '12px',
+            padding: '10px 14px',
+            background: 'linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(255, 152, 0, 0.1))',
+            border: '1px solid rgba(255, 193, 7, 0.3)',
+            borderRadius: '8px',
+            fontSize: '13px',
+            color: 'var(--text-primary)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <span>⚠️</span>
+            <span>Please enter a valid URL (e.g., https://example.com/video.mp4)</span>
+          </div>
+        )}
+      </div>
+
       <div style={{ 
         background: 'var(--bg-secondary)', 
         padding: '20px', 
@@ -1447,9 +1607,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           )}
         </div>
         
-        {/* Host Video Upload */}
-        {isHost && (
-          <div style={{ 
+        {/* Video Upload - Anyone Can Upload */}
+        <div style={{ 
             marginBottom: '20px', 
             padding: '20px', 
             background: 'linear-gradient(135deg, rgba(40, 167, 69, 0.1), rgba(32, 201, 151, 0.05))',
@@ -1479,19 +1638,19 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               position: 'relative',
               zIndex: 1
             }}>
-              <span style={{ fontSize: '24px' }}>👑</span> Host Video Upload
+              <span style={{ fontSize: '24px' }}>📁</span> Upload Video
             </h4>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="video/*"
-              onChange={handleFileUpload}
-              style={{ display: 'none' }}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="video/*"
+            onChange={handleFileUpload}
+            style={{ display: 'none' }}
               disabled={isUploading}
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="btn-success"
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="btn-success"
               style={{ 
                 marginBottom: '15px',
                 padding: '14px 24px',
@@ -1504,7 +1663,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               disabled={isUploading || isLoading}
             >
               {isUploading ? '⏳ Uploading...' : '📁 Upload Video for Everyone'}
-            </button>
+          </button>
             
             {isUploading && (
               <div style={{ marginTop: '15px', position: 'relative', zIndex: 1 }}>
@@ -1550,8 +1709,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                     color: 'var(--text-muted)'
                   }}>
                     Please wait...
-                  </span>
-                </div>
+          </span>
+        </div>
               </div>
             )}
             
@@ -1566,7 +1725,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               position: 'relative',
               zIndex: 1
             }}>
-              💡 Upload once - everyone in the room gets access automatically! (max 1GB)
+              💡 Anyone can upload - everyone in the room gets access automatically! (max 1GB)
             </div>
             
             {hostVideo && (
@@ -1771,10 +1930,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               </div>
             )}
           </div>
-        )}
 
-        {/* Guest Info */}
-        {!isHost && (
+        {/* Current Video Info - Show for all users */}
+        {hostVideo && (
           <div style={{ 
             marginBottom: '20px', 
             padding: '20px', 
@@ -1805,208 +1963,49 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               position: 'relative',
               zIndex: 1
             }}>
-              <span style={{ fontSize: '24px' }}>👥</span> Guest Mode
+              <span style={{ fontSize: '24px' }}>🎬</span> Current Video
             </h4>
-            <p style={{ 
-              fontSize: '14px', 
-              color: 'var(--text-secondary)', 
-              margin: '0 0 15px 0',
-              lineHeight: '1.6',
+            <div style={{ 
+              marginTop: '15px', 
+              padding: '14px', 
+              background: 'linear-gradient(135deg, rgba(0, 123, 255, 0.15), rgba(23, 162, 184, 0.1))',
+              borderRadius: '12px',
+              border: '1px solid rgba(0, 123, 255, 0.3)',
               position: 'relative',
               zIndex: 1
             }}>
-              The host will upload videos for everyone to watch. You don't need to upload anything!
-            </p>
-            {hostVideo && (
               <div style={{ 
-                marginTop: '15px', 
-                padding: '14px', 
-                background: 'linear-gradient(135deg, rgba(0, 123, 255, 0.15), rgba(23, 162, 184, 0.1))',
-                borderRadius: '12px',
-                border: '1px solid rgba(0, 123, 255, 0.3)',
-                position: 'relative',
-                zIndex: 1
+                display: 'flex', 
+                alignItems: 'center', 
+                gap: '8px',
+                marginBottom: '8px'
               }}>
-                <div style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: '8px',
-                  marginBottom: '8px'
-                }}>
-                  <span style={{ fontSize: '20px' }}>🎬</span>
-                  <strong style={{ color: '#007bff', fontSize: '15px' }}>
-                    Host's Video: {hostVideo.title}
-                  </strong>
-                </div>
-                <div style={{ 
-                  fontSize: '12px', 
-                  color: 'var(--text-secondary)',
-                  display: 'flex',
-                  gap: '12px',
-                  flexWrap: 'wrap'
-                }}>
-                  <span>📦 Size: <strong>{(hostVideo.size / (1024 * 1024)).toFixed(1)} MB</strong></span>
-                  {hostVideo.format && (
-                    <span>🎬 Format: <strong>{hostVideo.format.toUpperCase()}</strong></span>
-                  )}
-                </div>
+                <span style={{ fontSize: '20px' }}>✅</span>
+                <strong style={{ color: '#007bff', fontSize: '15px' }}>
+                  {hostVideo.title}
+                </strong>
               </div>
-            )}
-            
-            {/* Guest Video Library View */}
-            {videoLibrary.length > 0 && (
               <div style={{ 
-                marginTop: '20px', 
-                padding: '18px', 
-                background: 'var(--bg-secondary)',
-                borderRadius: '12px',
-                border: '1px solid var(--border-color)',
-                boxShadow: 'var(--shadow-sm)',
-                position: 'relative',
-                zIndex: 1
+                fontSize: '12px', 
+                color: 'var(--text-secondary)',
+                display: 'flex',
+                gap: '12px',
+                flexWrap: 'wrap'
               }}>
-                <div style={{ 
-                  display: 'flex', 
-                  justifyContent: 'space-between', 
-                  alignItems: 'center', 
-                  marginBottom: '12px' 
-                }}>
-                  <strong style={{ 
-                    color: '#007bff',
-                    fontSize: '16px',
-                    fontWeight: '700',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px'
-                  }}>
-                    <span style={{ fontSize: '20px' }}>📚</span> Available Videos ({videoLibrary.length})
-                  </strong>
-                  <button
-                    onClick={() => setShowLibrary(!showLibrary)}
-                    className="btn-info"
-                    style={{
-                      padding: '6px 14px',
-                      fontSize: '13px',
-                      fontWeight: '600',
-                      borderRadius: '8px'
-                    }}
-                  >
-                    {showLibrary ? '▼ Hide' : '▶ Show'}
-                  </button>
-                </div>
-                
-                {showLibrary && (
-                  <div style={{ 
-                    maxHeight: '300px', 
-                    overflowY: 'auto', 
-                    marginTop: '12px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px'
-                  }}>
-                    {videoLibrary.map((video, index) => (
-                      <div
-                        key={index}
-                        style={{
-                          padding: '14px 16px',
-                          background: videoUrl === video.url 
-                            ? 'linear-gradient(135deg, rgba(0, 123, 255, 0.2), rgba(23, 162, 184, 0.15))' 
-                            : 'var(--bg-tertiary)',
-                          borderRadius: '12px',
-                          border: videoUrl === video.url 
-                            ? '2px solid #007bff' 
-                            : '1px solid var(--border-color)',
-                          transition: 'all 0.3s ease',
-                          boxShadow: videoUrl === video.url 
-                            ? '0 4px 12px rgba(0, 123, 255, 0.3)' 
-                            : 'var(--shadow-sm)',
-                          position: 'relative',
-                          cursor: 'default'
-                        }}
-                      >
-                        <div style={{ 
-                          display: 'flex', 
-                          justifyContent: 'space-between', 
-                          alignItems: 'center',
-                          gap: '12px'
-                        }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ 
-                              display: 'flex', 
-                              alignItems: 'center', 
-                              gap: '8px',
-                              marginBottom: '6px'
-                            }}>
-                              {videoUrl === video.url && (
-                                <span style={{ 
-                                  fontSize: '16px',
-                                  color: '#007bff',
-                                  animation: 'pulse 2s infinite'
-                                }}>▶</span>
-                              )}
-                              <strong style={{ 
-                                fontSize: '14px',
-                                color: videoUrl === video.url ? '#007bff' : 'var(--text-primary)',
-                                fontWeight: '700'
-                              }}>
-                                {video.title}
-                              </strong>
-                            </div>
-                            <div style={{ 
-                              fontSize: '12px', 
-                              color: 'var(--text-secondary)',
-                              display: 'flex',
-                              gap: '10px',
-                              flexWrap: 'wrap',
-                              alignItems: 'center'
-                            }}>
-                              <span style={{
-                                padding: '2px 8px',
-                                background: 'var(--bg-tertiary)',
-                                borderRadius: '6px',
-                                fontWeight: '500'
-                              }}>
-                                📦 {(video.size / (1024 * 1024)).toFixed(1)} MB
-                              </span>
-                              {video.format && (
-                                <span style={{
-                                  padding: '2px 8px',
-                                  background: 'var(--bg-tertiary)',
-                                  borderRadius: '6px',
-                                  fontWeight: '500'
-                                }}>
-                                  🎬 {video.format.toUpperCase()}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          {videoUrl === video.url && (
-                            <span style={{ 
-                              fontSize: '12px', 
-                              color: 'white',
-                              background: 'linear-gradient(135deg, #007bff, #138496)',
-                              padding: '6px 12px',
-                              borderRadius: '8px',
-                              fontWeight: '700',
-                              boxShadow: '0 2px 8px rgba(0, 123, 255, 0.4)',
-                              whiteSpace: 'nowrap'
-                            }}>
-                              Now Playing
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                <span>📦 Size: <strong>{(hostVideo.size / (1024 * 1024)).toFixed(1)} MB</strong></span>
+                {hostVideo.format && (
+                  <span>🎬 Format: <strong>{hostVideo.format.toUpperCase()}</strong></span>
+                )}
+                {hostVideo.uploadedBy && (
+                  <span>👤 Uploaded by: <strong>{hostVideo.uploadedBy}</strong></span>
                 )}
               </div>
-            )}
+            </div>
           </div>
         )}
-
-        {/* Local File Upload (Legacy - for non-hosts who want local files) */}
-        {!isHost && (
-          <div style={{ marginBottom: '15px' }}>
+        
+        {/* Local File Upload (Legacy - for testing only) */}
+        <div style={{ marginBottom: '15px' }}>
             <details style={{ background: '#333', padding: '10px', borderRadius: '4px' }}>
               <summary style={{ cursor: 'pointer', color: '#ccc' }}>
                 📁 Upload Local Video (Advanced)
@@ -2024,7 +2023,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               </div>
             </details>
           </div>
-        )}
 
         {/* URL Input */}
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '15px' }}>
