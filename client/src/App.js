@@ -11,7 +11,7 @@ import { NotificationSettingsButton } from './components/NotificationSystem';
 const SOCKET_SERVER_URL = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
 
 function App() {
-  const { theme, toggleTheme, isDark } = useTheme();
+  const { toggleTheme, isDark } = useTheme();
   const { showNotification, NOTIFICATION_TYPES } = useNotifications();
   const [socket, setSocket] = useState(null);
   const [roomId, setRoomId] = useState('');
@@ -50,7 +50,6 @@ function App() {
       
       // Check if we have a saved room to reconnect to
       const savedRoomId = localStorage.getItem('watchParty_roomId');
-      const savedRoomData = localStorage.getItem('watchParty_roomData');
       const savedUsername = localStorage.getItem('watchParty_username') || '';
       
       // Also check URL parameter for room code

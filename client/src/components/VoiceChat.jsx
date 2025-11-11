@@ -691,7 +691,7 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       socket.off('new_user_joined_voice');
       socket.off('retry_voice_connection');
     };
-  }, [socket, audioStream, peerLoaded]);
+  }, [socket, audioStream, peerLoaded, addPeer, createPeer]);
 
   // Handle mute/unmute
   const toggleMute = () => {
@@ -791,14 +791,6 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
     };
   }, [audioStream]);
 
-  const getStatusColor = () => {
-    switch (connectionStatus) {
-      case 'connected': return '#28a745';
-      case 'connecting': return '#ffc107';
-      case 'error': return '#dc3545';
-      default: return '#6c757d';
-    }
-  };
 
   const getStatusIcon = () => {
     switch (connectionStatus) {

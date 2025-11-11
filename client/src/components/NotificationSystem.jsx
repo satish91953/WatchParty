@@ -708,10 +708,6 @@ export function NotificationSettings() {
   const { settings, updateSettings } = useNotifications();
   const [isExpanded, setIsExpanded] = useState(false);
 
-  const toggleSetting = (key) => {
-    updateSettings({ [key]: !settings[key] });
-  };
-
   return (
     <div className="component-card" style={{ marginBottom: 0 }}>
       <div style={{

@@ -13,7 +13,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const [isLoading, setIsLoading] = useState(false);
   const [currentVideoFile, setCurrentVideoFile] = useState(null);
   const [playerError, setPlayerError] = useState('');
-  const [playerReady, setPlayerReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
@@ -111,9 +110,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const videoInitialized = useRef(false);
   const lastSyncTimeRef = useRef(0);
   const youtubeSyncIntervalRef = useRef(null);
-  // Event queue to handle rapid events from multiple users
-  const eventQueueRef = useRef([]);
-  const processingQueueRef = useRef(false);
   const lastEventIdRef = useRef(0);
   
   // Touch/swipe gesture refs for mobile
@@ -121,7 +117,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const touchStartY = useRef(0);
   const touchStartTime = useRef(0);
   const isSwipeActive = useRef(false);
-  const swipeFeedbackRef = useRef(null);
   const [swipeFeedback, setSwipeFeedback] = useState(null);
 
   // Expose video ref to parent
@@ -495,7 +490,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     // Ensure video loads properly
     const handleVideoReady = () => {
       console.log('✅ Video ready for playback');
-      setPlayerReady(true);
       videoInitialized.current = true;
       
       // Set initial state if provided
@@ -561,7 +555,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         }
       }
     };
-  }, [videoUrl, isHLS]); // Include isHLS in dependencies
+  }, [videoUrl, isHLS, currentUser, initialVideo, isSyncing, isYouTube, roomId, socket]); // Include all dependencies
 
   // Listen for socket events with improved logic
   useEffect(() => {
@@ -1504,7 +1498,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       socket.off('video_speed_change', handleVideoSpeedChange);
       socket.off('video_sync_state', handleVideoSyncState);
     };
-  }, [socket, currentUser, isYouTube, roomId, videoUrl]);
+  }, [socket, currentUser, isYouTube, roomId, videoUrl, isHLS, showNotification]);
 
   // Periodic sync for YouTube videos to prevent drift
   useEffect(() => {
@@ -1686,7 +1680,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
 
     // Check format support and warn if needed
     const formats = getSupportedFormats();
-    const fileType = file.type.toLowerCase();
     const fileName = file.name.toLowerCase();
     
     let formatWarning = '';
@@ -1777,41 +1770,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     }
   };
 
-  const handleLocalFileUpload = (file) => {
-    setIsLoading(true);
-    setPlayerError('');
-    setPlayerReady(false);
-    
-    try {
-      if (videoUrl.startsWith('blob:')) {
-        URL.revokeObjectURL(videoUrl);
-      }
-      
-      const blobUrl = URL.createObjectURL(file);
-      const title = `Local: ${file.name}`;
-      
-      setVideoUrl(blobUrl);
-      setVideoTitle(title);
-      setCurrentVideoFile(file);
-      
-      if (socket && roomId) {
-        socket.emit('video_url_change', {
-          roomId,
-          videoUrl: blobUrl,
-          videoTitle: title
-        });
-      }
-      
-      console.log('Local file loaded:', title);
-      
-    } catch (error) {
-      console.error('Error loading file:', error);
-      setPlayerError('Failed to load local file');
-    }
-    
-    setIsLoading(false);
-  };
-
   const extractVideoTitle = (url) => {
     try {
       const urlObj = new URL(url);
@@ -1819,23 +1777,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       return filename || 'Custom Video';
     } catch {
       return 'Custom Video';
-    }
-  };
-
-  const testVideo = () => {
-    if (videoRef.current) {
-      console.log('🧪 Testing video playback...');
-      videoRef.current.play().then(() => {
-        console.log('✅ Video play successful');
-        setPlayerError('');
-      }).catch(err => {
-        if (err.name !== 'AbortError') {
-          console.error('❌ Video play failed:', err);
-          setPlayerError(`Play failed: ${err.message}`);
-        }
-      });
-    } else {
-      setPlayerError('Video element not ready');
     }
   };
 
@@ -1993,7 +1934,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         URL.revokeObjectURL(videoUrl);
       }
     };
-  }, []);
+  }, [videoUrl]);
 
   // Touch gesture handlers for mobile video controls
   const handleTouchStart = (e) => {
@@ -2012,7 +1953,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     const touch = e.touches[0];
     const deltaX = touch.clientX - touchStartX.current;
     const deltaY = touch.clientY - touchStartY.current;
-    const deltaTime = Date.now() - touchStartTime.current;
     
     // Determine if this is a horizontal (seek) or vertical (volume) swipe
     if (Math.abs(deltaX) > 30 || Math.abs(deltaY) > 30) {
@@ -2385,7 +2325,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           
           {/* Mobile Play Prompt Overlay - Show when video is paused on mobile */}
           {/* Always show for Chrome/Brave on mobile when paused */}
-          {isMobile && videoPaused && videoRef.current && (
+          {isMobile && videoPaused && showMobilePlayPrompt && videoRef.current && (
             <div
               onTouchStart={(e) => {
                 e.stopPropagation();
