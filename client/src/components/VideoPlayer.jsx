@@ -26,6 +26,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const [isYouTube, setIsYouTube] = useState(false);
   const [youtubeVideoId, setYoutubeVideoId] = useState(null);
   const youtubeSyncInProgress = useRef(false);
+  const [isHLS, setIsHLS] = useState(false);
+  const hlsRef = useRef(null);
   
   // Refs to prevent sync loops
   const syncTimeoutRef = useRef(null);
@@ -36,6 +38,10 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const videoInitialized = useRef(false);
   const lastSyncTimeRef = useRef(0);
   const youtubeSyncIntervalRef = useRef(null);
+  // Event queue to handle rapid events from multiple users
+  const eventQueueRef = useRef([]);
+  const processingQueueRef = useRef(false);
+  const lastEventIdRef = useRef(0);
   
   // Touch/swipe gesture refs for mobile
   const touchStartX = useRef(0);
@@ -73,10 +79,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     fetchVideoLibrary();
   }, [roomId]);
 
-  // Check if current video URL is YouTube and update state
+  // Check if current video URL is YouTube or HLS and update state
   useEffect(() => {
     const youtubeCheck = isYouTubeUrl(videoUrl);
+    const hlsCheck = isHLSUrl(videoUrl);
+    
     setIsYouTube(youtubeCheck);
+    setIsHLS(hlsCheck);
     
     if (youtubeCheck) {
       const videoId = extractYouTubeId(videoUrl);
@@ -84,6 +93,10 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       console.log('📺 YouTube video detected:', videoId);
     } else {
       setYoutubeVideoId(null);
+    }
+    
+    if (hlsCheck) {
+      console.log('📺 HLS stream detected:', videoUrl);
     }
   }, [videoUrl]);
 
@@ -211,15 +224,70 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     const video = videoRef.current;
     
     // Only set up video if URL has actually changed
-    if (video.src === videoUrl) {
+    if (video.src === videoUrl && !isHLS) {
       console.log('🎬 Video URL unchanged, skipping setup');
       return;
     }
     
     console.log('🎬 Setting up video with URL:', videoUrl);
     
-    // Set video source
-    video.src = videoUrl;
+    // Cleanup previous HLS instance if exists
+    if (hlsRef.current) {
+      try {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      } catch (e) {
+        console.warn('Error destroying HLS instance:', e);
+      }
+    }
+    
+    // Initialize HLS if it's an HLS stream
+    if (isHLS && typeof window.Hls !== 'undefined') {
+      console.log('📺 Initializing HLS.js for:', videoUrl);
+      const hls = new window.Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        backBufferLength: 90
+      });
+      
+      hls.loadSource(videoUrl);
+      hls.attachMedia(video);
+      
+      hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        console.log('✅ HLS manifest parsed, ready to play');
+        setPlayerReady(true);
+        videoInitialized.current = true;
+      });
+      
+      hls.on(window.Hls.Events.ERROR, (event, data) => {
+        console.error('❌ HLS error:', data);
+        if (data.fatal) {
+          switch (data.type) {
+            case window.Hls.ErrorTypes.NETWORK_ERROR:
+              console.log('🔄 Fatal network error, trying to recover...');
+              hls.startLoad();
+              break;
+            case window.Hls.ErrorTypes.MEDIA_ERROR:
+              console.log('🔄 Fatal media error, trying to recover...');
+              hls.recoverMediaError();
+              break;
+            default:
+              console.log('❌ Fatal error, destroying HLS instance');
+              hls.destroy();
+              setPlayerError('HLS playback error');
+              break;
+          }
+        }
+      });
+      
+      hlsRef.current = hls;
+    } else if (isHLS && typeof window.Hls === 'undefined') {
+      console.error('❌ HLS.js library not loaded');
+      setPlayerError('HLS.js library is required for HLS streams. Please refresh the page.');
+    } else {
+      // Set video source for regular videos
+      video.src = videoUrl;
+    }
     
     // Video event listeners with debouncing
     const handleLoadStart = () => {
@@ -248,52 +316,93 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     };
 
     // Debounced event handlers - ANYONE can control playback
+    // Increased debounce times for better multi-user stability
     const handlePlay = () => {
       const now = Date.now();
-      // Don't emit if we're currently syncing or too soon after last event
-      // Increased to 1500ms to prevent cascading events with multiple users
-      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 1500 || !videoInitialized.current) {
+      // Increased to 2000ms to prevent cascading events with multiple users (3-10 users)
+      // Be less strict - don't require videoInitialized, just check readyState
+      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 2000) {
         ignoreNextEvent.current = false;
         return;
       }
       
-      if (socket && roomId && !isSyncing && videoInitialized.current) {
+      // Check if video is ready (be lenient)
+      if (!video || video.readyState < 1) {
+        console.log('⏳ Video not ready for user play, skipping...');
+        return;
+      }
+      
+      if (socket && roomId && !isSyncing) {
         const currentTime = video.currentTime;
-        console.log('🎬 User control: Emitting play at time:', currentTime);
-        socket.emit('video_play', { roomId, currentTime, initiatedBy: currentUser });
+        const eventId = ++lastEventIdRef.current;
+        console.log(`🎬 User control: Emitting play at time: ${currentTime} (eventId: ${eventId})`);
+        socket.emit('video_play', { 
+          roomId, 
+          currentTime, 
+          initiatedBy: currentUser,
+          eventId,
+          timestamp: now
+        });
         lastEventTime.current = now;
       }
     };
 
     const handlePause = () => {
       const now = Date.now();
-      // Don't emit if we're currently syncing or too soon after last event
-      // Increased to 1500ms to prevent cascading events with multiple users
-      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 1500 || !videoInitialized.current) {
+      // Increased to 2000ms to prevent cascading events with multiple users (3-10 users)
+      // Be less strict - don't require videoInitialized, just check readyState
+      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 2000) {
         ignoreNextEvent.current = false;
         return;
       }
       
-      if (socket && roomId && !isSyncing && videoInitialized.current) {
+      // Check if video is ready (be lenient)
+      if (!video || video.readyState < 1) {
+        console.log('⏳ Video not ready for user pause, skipping...');
+        return;
+      }
+      
+      if (socket && roomId && !isSyncing) {
         const currentTime = video.currentTime;
-        console.log('⏸️ User control: Emitting pause at time:', currentTime);
-        socket.emit('video_pause', { roomId, currentTime, initiatedBy: currentUser });
+        const eventId = ++lastEventIdRef.current;
+        console.log(`⏸️ User control: Emitting pause at time: ${currentTime} (eventId: ${eventId})`);
+        socket.emit('video_pause', { 
+          roomId, 
+          currentTime, 
+          initiatedBy: currentUser,
+          eventId,
+          timestamp: now
+        });
         lastEventTime.current = now;
       }
     };
 
     const handleSeeked = () => {
       const now = Date.now();
-      // Increased to 2500ms to prevent cascading events with multiple users
-      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 2500 || !videoInitialized.current) {
+      // Increased to 3000ms to prevent cascading events with multiple users (3-10 users)
+      // Be less strict - don't require videoInitialized, just check readyState
+      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 3000) {
         ignoreNextEvent.current = false;
         return;
       }
       
-      if (socket && roomId && !isSyncing && videoInitialized.current) {
+      // Check if video is ready (be lenient)
+      if (!video || video.readyState < 1) {
+        console.log('⏳ Video not ready for user seek, skipping...');
+        return;
+      }
+      
+      if (socket && roomId && !isSyncing) {
         const currentTime = video.currentTime;
-        console.log('⏭️ User control: Emitting seek to time:', currentTime);
-        socket.emit('video_seek', { roomId, currentTime, initiatedBy: currentUser });
+        const eventId = ++lastEventIdRef.current;
+        console.log(`⏭️ User control: Emitting seek to time: ${currentTime} (eventId: ${eventId})`);
+        socket.emit('video_seek', { 
+          roomId, 
+          currentTime, 
+          initiatedBy: currentUser,
+          eventId,
+          timestamp: now
+        });
         lastEventTime.current = now;
       }
     };
@@ -324,11 +433,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       }
     };
 
-    // Wait for video to be ready
-    if (video.readyState >= 2) {
-      handleVideoReady();
-    } else {
-      video.addEventListener('loadeddata', handleVideoReady, { once: true });
+    // Wait for video to be ready (skip for HLS as it handles its own ready event)
+    if (!isHLS) {
+      if (video.readyState >= 2) {
+        handleVideoReady();
+      } else {
+        video.addEventListener('loadeddata', handleVideoReady, { once: true });
+      }
     }
 
     return () => {
@@ -340,8 +451,18 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
       video.removeEventListener('seeked', handleSeeked);
+      
+      // Cleanup HLS instance
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.destroy();
+          hlsRef.current = null;
+        } catch (e) {
+          console.warn('Error destroying HLS instance on cleanup:', e);
+        }
+      }
     };
-  }, [videoUrl]); // Only depend on videoUrl, not other state
+  }, [videoUrl, isHLS]); // Include isHLS in dependencies
 
   // Listen for socket events with improved logic
   useEffect(() => {
@@ -355,6 +476,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         const socketId = socket?.id;
         const isOwnEvent = data.initiatedBy === currentUser || data.socketId === socketId;
         
+        // Check if we've already processed this event (by eventId or timestamp)
+        const eventKey = `${data.eventId || data.timestamp || Date.now()}-${data.initiatedBy}`;
+        if (lastSyncTimeRef.current === eventKey && !syncInProgress.current) {
+          console.log('🚫 Ignoring duplicate YouTube play event:', eventKey);
+          return;
+        }
+        
         // Skip periodic sync events from same user
         if (data.isPeriodicSync && isOwnEvent) {
           return;
@@ -363,6 +491,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         if (isOwnEvent && !syncInProgress.current && !data.isPeriodicSync) {
           return;
         }
+        
+        // Store event key to prevent duplicate processing
+        lastSyncTimeRef.current = eventKey;
         
         youtubeSyncInProgress.current = true;
         syncInProgress.current = true;
@@ -401,10 +532,28 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       }
       
       // Handle HTML5 video
-      if (!videoRef.current) return;
+      if (!videoRef.current) {
+        console.warn('⚠️ Video ref not available, cannot sync play');
+        return;
+      }
       
       const video = videoRef.current;
       const socketId = socket?.id;
+      
+      // Check if video URL is set - if not, request sync state
+      // Note: We allow the default sample video URL, but if it's still the default and we're in a room,
+      // we should request the actual video state
+      const isDefaultVideo = videoUrl === 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
+      if (!videoUrl || (isDefaultVideo && roomId)) {
+        console.log('⏳ Video URL not set or is default, requesting sync state...');
+        if (socket && roomId) {
+          socket.emit('request_video_state', { roomId });
+        }
+        // Don't process play event until we have the correct video URL
+        // The sync state handler will handle setting the video and playing it
+        return;
+      }
+      
       console.log('📥 PLAY EVENT RECEIVED:', { 
         initiatedBy: data.initiatedBy, 
         eventSocketId: data.socketId,
@@ -413,20 +562,34 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         matchInitiated: data.initiatedBy === currentUser,
         matchSocketId: data.socketId === socketId || data.initiatedBy === socketId,
         syncInProgress: syncInProgress.current,
-        videoPaused: video.paused
+        videoPaused: video.paused,
+        videoUrl: videoUrl,
+        videoReadyState: video.readyState
       });
       
       // Don't process if it's our own event (prevent loop)
       // Check both initiatedBy and socketId for maximum compatibility
+      // Also check eventId to prevent duplicate processing
       const isOwnEvent = data.initiatedBy === currentUser || 
                         data.initiatedBy === socketId ||
                         data.socketId === socketId ||
                         data.socketId === currentUser;
       
+      // Check if we've already processed this event (by eventId or timestamp)
+      // Only check if we're not currently syncing (to allow retries during sync)
+      const eventKey = `${data.eventId || data.timestamp || Date.now()}-${data.initiatedBy}`;
+      if (lastSyncTimeRef.current === eventKey && !syncInProgress.current && video.readyState >= 2) {
+        console.log('🚫 Ignoring duplicate play event:', eventKey);
+        return;
+      }
+      
       if (isOwnEvent && !syncInProgress.current) {
         console.log('🚫 Ignoring own play event');
         return;
       }
+      
+      // Store event key to prevent duplicate processing
+      lastSyncTimeRef.current = eventKey;
       
       console.log('🔄 Processing play sync from another user at time:', data.currentTime);
       
@@ -440,13 +603,65 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       }
 
       try {
-        // Ensure video is loaded before syncing
+        // For HLS streams, ensure HLS instance is ready
+        if (isHLS && hlsRef.current) {
+          const hls = hlsRef.current;
+          // Check if HLS is ready (manifest parsed)
+          if (hls.media && hls.media.readyState >= 2) {
+            console.log('✅ HLS ready, syncing play...');
+            syncVideoPlay(video, data.currentTime);
+          } else {
+            console.log('⏳ HLS not ready, waiting for manifest...');
+            // Wait for HLS to be ready
+            const checkHLSReady = () => {
+              if (hls.media && hls.media.readyState >= 2) {
+                console.log('✅ HLS ready, now syncing...');
+                syncVideoPlay(video, data.currentTime);
+              } else {
+                setTimeout(checkHLSReady, 100);
+              }
+            };
+            // Also listen for manifest parsed event
+            hls.once(window.Hls.Events.MANIFEST_PARSED, () => {
+              console.log('✅ HLS manifest parsed, syncing play...');
+              syncVideoPlay(video, data.currentTime);
+            });
+            checkHLSReady();
+          }
+          return;
+        }
+        
+        // For regular videos, ensure video is loaded before syncing
+        // Be less strict - only check readyState, not videoInitialized
         if (video.readyState < 2) {
-          console.log('⏳ Video not ready, waiting...');
-          video.addEventListener('loadeddata', () => {
+          console.log('⏳ Video not ready (readyState:', video.readyState, '), waiting...');
+          
+          // Wait for video to be ready (with timeout)
+          let waitCount = 0;
+          const maxWait = 50; // Max 5 seconds (50 * 100ms)
+          
+          const waitForReady = () => {
+            waitCount++;
+            if (video.readyState >= 2) {
+              console.log('✅ Video ready, now syncing...');
+              syncVideoPlay(video, data.currentTime);
+            } else if (waitCount < maxWait) {
+              setTimeout(waitForReady, 100);
+            } else {
+              console.warn('⚠️ Video not ready after waiting, attempting sync anyway...');
+              // Try to sync anyway - video might still work
+              syncVideoPlay(video, data.currentTime);
+            }
+          };
+          
+          // Also listen for loadeddata event as backup
+          const onLoadedData = () => {
             console.log('✅ Video loaded, now syncing...');
             syncVideoPlay(video, data.currentTime);
-          }, { once: true });
+          };
+          video.addEventListener('loadeddata', onLoadedData, { once: true });
+          
+          waitForReady();
           return;
         }
         
@@ -456,32 +671,96 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         console.error('Error in sync play:', error);
       }
 
-      // Reset sync flag after delay
+      // Reset sync flag after delay - increased for multi-user stability
       syncTimeoutRef.current = setTimeout(() => {
         setIsSyncing(false);
         syncInProgress.current = false;
-      }, 2000);
+        ignoreNextEvent.current = false; // Reset ignore flag
+      }, 3000);
     };
 
     const syncVideoPlay = (video, targetTime) => {
       try {
+        // Double-check video exists
+        if (!video) {
+          console.warn('⚠️ Video element not available');
+          return;
+        }
+        
+        // For HLS, check if HLS instance exists (but be lenient)
+        if (isHLS) {
+          if (!hlsRef.current) {
+            console.warn('⚠️ HLS instance not available, waiting...');
+            setTimeout(() => syncVideoPlay(video, targetTime), 200);
+            return;
+          }
+          // For HLS, we can be more lenient - try to play even if not fully ready
+        } else {
+          // For regular videos, check readyState but be lenient
+          if (video.readyState < 1) {
+            console.warn('⚠️ Video not ready for sync play (readyState:', video.readyState, '), retrying...');
+            setTimeout(() => syncVideoPlay(video, targetTime), 200);
+            return;
+          }
+        }
+        
         const timeDiff = Math.abs(video.currentTime - targetTime);
         
         // Only seek if there's a significant time difference
         if (timeDiff > 0.5) {
+          console.log(`⏭️ Seeking from ${video.currentTime} to ${targetTime}`);
           video.currentTime = targetTime;
-          console.log('⏭️ Synced time to:', targetTime);
+          
+          // For HLS streams, wait a bit longer for buffering before playing
+          if (isHLS && hlsRef.current) {
+            // HLS streams need time to buffer the segment
+            setTimeout(() => {
+              if (!video.paused) {
+                console.log('✅ Video already playing after seek');
+                return; // Already playing
+              }
+              console.log('▶️ Starting HLS playback after seek...');
+              video.play().catch(err => {
+                if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
+                  console.error('HLS sync play failed:', err);
+                } else if (err.name === 'NotAllowedError') {
+                  console.log('ℹ️ Autoplay blocked - user interaction required');
+                }
+              });
+            }, 300); // Increased delay for HLS buffering
+            return; // Exit early, play will happen in setTimeout
+          }
+          
+          // For regular videos, wait a moment for seek to complete
+          setTimeout(() => {
+            if (video.paused) {
+              console.log('▶️ Starting playback after seek...');
+              video.play().catch(err => {
+                if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
+                  console.error('Sync play failed:', err);
+                } else if (err.name === 'NotAllowedError') {
+                  console.log('ℹ️ Autoplay blocked - user interaction required');
+                }
+              });
+            }
+          }, 100);
+          return;
         }
         
+        // No seek needed, just play if paused
         if (video.paused) {
-          console.log('▶️ Starting playback...');
+          console.log('▶️ Starting playback (no seek needed)...');
           // Try to play - if it fails due to browser restrictions, that's okay
           video.play().catch(err => {
             if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
               console.error('Sync play failed:', err);
+            } else if (err.name === 'NotAllowedError') {
+              console.log('ℹ️ Autoplay blocked - user interaction required');
             }
             // NotAllowedError is expected for autoplay - user will need to click play
           });
+        } else {
+          console.log('✅ Video already playing');
         }
       } catch (error) {
         console.error('Error in syncVideoPlay:', error);
@@ -493,9 +772,20 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       if (isYouTube && youtubePlayerRef.current) {
         const socketId = socket?.id;
         const isOwnEvent = data.initiatedBy === currentUser || data.socketId === socketId;
+        
+        // Check if we've already processed this event (by eventId or timestamp)
+        const eventKey = `${data.eventId || data.timestamp || Date.now()}-${data.initiatedBy}`;
+        if (lastSyncTimeRef.current === eventKey && !syncInProgress.current) {
+          console.log('🚫 Ignoring duplicate YouTube pause event:', eventKey);
+          return;
+        }
+        
         if (isOwnEvent && !syncInProgress.current) {
           return;
         }
+        
+        // Store event key to prevent duplicate processing
+        lastSyncTimeRef.current = eventKey;
         
         youtubeSyncInProgress.current = true;
         syncInProgress.current = true;
@@ -518,12 +808,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             youtubePlayerRef.current.pauseVideo();
           }
           
-          // Reduced timeout for faster response
+          // Increased timeout for multi-user stability
           setTimeout(() => {
             youtubeSyncInProgress.current = false;
             syncInProgress.current = false;
             setIsSyncing(false);
-          }, 600);
+          }, 1000);
         } catch (error) {
           console.error('Error syncing YouTube pause:', error);
           youtubeSyncInProgress.current = false;
@@ -551,15 +841,26 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       
       // Don't process if it's our own event (prevent loop)
       // Check both initiatedBy and socketId for maximum compatibility
+      // Also check eventId to prevent duplicate processing
       const isOwnEvent = data.initiatedBy === currentUser || 
                         data.initiatedBy === socketId ||
                         data.socketId === socketId ||
                         data.socketId === currentUser;
       
+      // Check if we've already processed this event (by eventId or timestamp)
+      const eventKey = `${data.eventId || data.timestamp || Date.now()}-${data.initiatedBy}`;
+      if (lastSyncTimeRef.current === eventKey && !syncInProgress.current) {
+        console.log('🚫 Ignoring duplicate pause event:', eventKey);
+        return;
+      }
+      
       if (isOwnEvent && !syncInProgress.current) {
         console.log('🚫 Ignoring own pause event');
         return;
       }
+      
+      // Store event key to prevent duplicate processing
+      lastSyncTimeRef.current = eventKey;
       
       console.log('🔄 PROCESSING PAUSE - Pausing video now!');
       
@@ -660,19 +961,41 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         }
       }
 
-      // Reset sync flags after delay
+      // Reset sync flags after delay - increased for multi-user stability
       syncTimeoutRef.current = setTimeout(() => {
         console.log('🔄 Resetting sync flags');
         setIsSyncing(false);
         syncInProgress.current = false;
-      }, 1500);
+        ignoreNextEvent.current = false; // Reset ignore flag
+      }, 3000);
     };
 
     const handleVideoSeek = (data) => {
-      if (data.initiatedBy === currentUser || syncInProgress.current) {
-        console.log('🚫 Ignoring own seek event or sync in progress');
+      // Check if we've already processed this event (by eventId or timestamp)
+      const eventKey = `${data.eventId || data.timestamp || Date.now()}-${data.initiatedBy}`;
+      if (lastSyncTimeRef.current === eventKey && !syncInProgress.current) {
+        console.log('🚫 Ignoring duplicate seek event:', eventKey);
         return;
       }
+      
+      const socketId = socket?.id;
+      const isOwnEvent = data.initiatedBy === currentUser || 
+                        data.initiatedBy === socketId ||
+                        data.socketId === socketId ||
+                        data.socketId === currentUser;
+      
+      if (isOwnEvent && !syncInProgress.current) {
+        console.log('🚫 Ignoring own seek event');
+        return;
+      }
+      
+      if (syncInProgress.current) {
+        console.log('🚫 Ignoring seek event - sync in progress');
+        return;
+      }
+      
+      // Store event key to prevent duplicate processing
+      lastSyncTimeRef.current = eventKey;
       
       // Handle YouTube player
       if (isYouTube && youtubePlayerRef.current) {
@@ -714,6 +1037,20 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       try {
         video.currentTime = data.currentTime;
         console.log('⏭️ Synced seek to time:', data.currentTime);
+        
+        // For HLS streams, ensure proper buffering after seek
+        if (isHLS && hlsRef.current) {
+          // HLS might need a moment to load the segment at the new position
+          // The video element will handle this, but we can wait a bit
+          setTimeout(() => {
+            // Verify the seek completed
+            const actualTime = video.currentTime;
+            const timeDiff = Math.abs(actualTime - data.currentTime);
+            if (timeDiff > 1) {
+              console.log(`⚠️ HLS seek may not have completed. Expected: ${data.currentTime}, Actual: ${actualTime}`);
+            }
+          }, 300);
+        }
       } catch (error) {
         console.error('Error in sync seek:', error);
       }
@@ -869,7 +1206,47 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           }
         } else if (videoRef.current) {
           const video = videoRef.current;
-          if (video.readyState >= 2) {
+          
+          // For HLS streams, wait for HLS to be ready
+          if (isHLS && hlsRef.current) {
+            const hls = hlsRef.current;
+            const applyHLSState = () => {
+              if (hls.media && hls.media.readyState >= 2) {
+                const targetTime = data.currentTime || 0;
+                const timeDiff = Math.abs(video.currentTime - targetTime);
+                
+                if (timeDiff > 0.5) {
+                  video.currentTime = targetTime;
+                }
+                
+                setTimeout(() => {
+                  if (data.isPlaying && video.paused) {
+                    video.play().catch(err => console.error('HLS play error:', err));
+                  } else if (!data.isPlaying && !video.paused) {
+                    video.pause();
+                  }
+                  
+                  if (data.playbackSpeed) {
+                    video.playbackRate = data.playbackSpeed;
+                    setPlaybackSpeed(data.playbackSpeed);
+                  }
+                }, 200);
+              } else {
+                // Wait for HLS to be ready
+                setTimeout(applyHLSState, 100);
+              }
+            };
+            
+            // Listen for manifest parsed if not ready
+            if (hls.media && hls.media.readyState < 2) {
+              hls.once(window.Hls.Events.MANIFEST_PARSED, applyHLSState);
+            }
+            applyHLSState();
+            return;
+          }
+          
+          // For regular videos
+          if (video.readyState >= 2 && videoInitialized.current) {
             const targetTime = data.currentTime || 0;
             const timeDiff = Math.abs(video.currentTime - targetTime);
             
@@ -877,28 +1254,39 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               video.currentTime = targetTime;
             }
             
-            if (data.isPlaying && video.paused) {
-              video.play().catch(err => console.error('Play error:', err));
-            } else if (!data.isPlaying && !video.paused) {
-              video.pause();
-            }
-            
-            if (data.playbackSpeed) {
-              video.playbackRate = data.playbackSpeed;
-              setPlaybackSpeed(data.playbackSpeed);
-            }
-          } else {
-            // Wait for video to load
-            video.addEventListener('loadeddata', () => {
-              video.currentTime = data.currentTime || 0;
-              if (data.isPlaying) {
+            setTimeout(() => {
+              if (data.isPlaying && video.paused) {
                 video.play().catch(err => console.error('Play error:', err));
+              } else if (!data.isPlaying && !video.paused) {
+                video.pause();
               }
+              
               if (data.playbackSpeed) {
                 video.playbackRate = data.playbackSpeed;
                 setPlaybackSpeed(data.playbackSpeed);
               }
-            }, { once: true });
+            }, 100);
+          } else {
+            // Wait for video to load
+            const applyState = () => {
+              if (video.readyState >= 2 && videoInitialized.current) {
+                video.currentTime = data.currentTime || 0;
+                setTimeout(() => {
+                  if (data.isPlaying) {
+                    video.play().catch(err => console.error('Play error:', err));
+                  }
+                  if (data.playbackSpeed) {
+                    video.playbackRate = data.playbackSpeed;
+                    setPlaybackSpeed(data.playbackSpeed);
+                  }
+                }, 100);
+              } else {
+                setTimeout(applyState, 100);
+              }
+            };
+            
+            video.addEventListener('loadeddata', applyState, { once: true });
+            applyState();
           }
         }
         
@@ -1000,6 +1388,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const getVideoType = (url) => {
     // Detect video format from URL or file extension
     const urlLower = url.toLowerCase();
+    if (urlLower.includes('.m3u8') || urlLower.includes('application/vnd.apple.mpegurl')) {
+      return 'application/vnd.apple.mpegurl'; // HLS MIME type
+    }
     if (urlLower.includes('.mp4') || urlLower.includes('video/mp4')) return 'video/mp4';
     if (urlLower.includes('.webm') || urlLower.includes('video/webm')) return 'video/webm';
     if (urlLower.includes('.ogg') || urlLower.includes('video/ogg') || urlLower.includes('.ogv')) return 'video/ogg';
@@ -1029,6 +1420,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     if (!url) return false;
     const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+/;
     return youtubeRegex.test(url);
+  };
+
+  // Check if URL is an HLS stream
+  const isHLSUrl = (url) => {
+    if (!url) return false;
+    const urlLower = url.toLowerCase();
+    return urlLower.includes('.m3u8') || urlLower.includes('application/vnd.apple.mpegurl');
   };
 
   // Extract YouTube video ID from URL

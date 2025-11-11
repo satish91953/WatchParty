@@ -420,7 +420,9 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('video_play', {
       currentTime: data.currentTime,
       initiatedBy: userId, // Use consistent ID
-      socketId: socket.id  // Also send socket.id for compatibility
+      socketId: socket.id,  // Also send socket.id for compatibility
+      eventId: data.eventId || Date.now(), // Include eventId for deduplication
+      timestamp: data.timestamp || Date.now() // Include timestamp for deduplication
     });
     
     // Update room state in database
@@ -442,7 +444,9 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('video_pause', {
       currentTime: data.currentTime,
       initiatedBy: userId, // Use consistent ID
-      socketId: socket.id   // Also send socket.id for compatibility
+      socketId: socket.id,   // Also send socket.id for compatibility
+      eventId: data.eventId || Date.now(), // Include eventId for deduplication
+      timestamp: data.timestamp || Date.now() // Include timestamp for deduplication
     });
     
     // Also log for debugging
@@ -462,9 +466,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('video_seek', async (data) => {
+    const userId = socket.userId || socket.id;
     socket.to(data.roomId).emit('video_seek', {
       currentTime: data.currentTime,
-      initiatedBy: socket.userId || socket.id
+      initiatedBy: userId,
+      socketId: socket.id, // Include socket.id for compatibility
+      eventId: data.eventId || Date.now(), // Include eventId for deduplication
+      timestamp: data.timestamp || Date.now() // Include timestamp for deduplication
     });
     
     await Room.findOneAndUpdate(
