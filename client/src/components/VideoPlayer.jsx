@@ -34,6 +34,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const [videoPaused, setVideoPaused] = useState(true);
   const autoplayAttemptedRef = useRef(false);
   
+  // Detect Chrome and Brave browsers (they have stricter autoplay policies)
+  const isChromeOrBrave = () => {
+    const ua = navigator.userAgent.toLowerCase();
+    return ua.includes('chrome') || ua.includes('brave') || ua.includes('edg');
+  };
+  
   // Detect mobile device - check on mount and window resize
   useEffect(() => {
     const checkMobile = () => {
@@ -42,9 +48,18 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       setIsMobile(mobile);
       
       // If mobile and video is paused, show prompt immediately
+      // Especially important for Chrome/Brave which have stricter policies
       if (mobile && videoRef.current && videoRef.current.paused) {
         setShowMobilePlayPrompt(true);
         setVideoPaused(true);
+      }
+      
+      // For Chrome/Brave on mobile, always show prompt when video is paused
+      if (mobile && isChromeOrBrave() && videoRef.current) {
+        if (videoRef.current.paused) {
+          setShowMobilePlayPrompt(true);
+          setVideoPaused(true);
+        }
       }
       
       return mobile;
@@ -62,6 +77,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   };
   
   // Periodic check for mobile video state to ensure overlay shows
+  // Especially important for Chrome/Brave browsers
   useEffect(() => {
     if (!isMobile || !videoRef.current) return;
     
@@ -72,13 +88,17 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           setVideoPaused(paused);
           if (paused) {
             setShowMobilePlayPrompt(true);
+            // For Chrome/Brave, ensure prompt is always visible when paused
+            if (isChromeOrBrave()) {
+              setShowMobilePlayPrompt(true);
+            }
           }
         }
       }
     };
     
-    // Check every 500ms on mobile
-    const interval = setInterval(checkVideoState, 500);
+    // Check more frequently for Chrome/Brave (every 300ms)
+    const interval = setInterval(checkVideoState, isChromeOrBrave() ? 300 : 500);
     return () => clearInterval(interval);
   }, [isMobile, videoPaused]);
   
@@ -494,9 +514,21 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         }, 500); // Small delay to ensure video is fully ready
       }
       
+      // For Chrome/Brave on mobile, always show prompt when video is paused
+      if (isMobileDevice() && isChromeOrBrave() && video.paused) {
+        setTimeout(() => {
+          setShowMobilePlayPrompt(true);
+          setVideoPaused(true);
+        }, 300); // Shorter delay for Chrome/Brave
+      }
+      
       // Update paused state
       if (video.paused) {
         setVideoPaused(true);
+        // For Chrome/Brave on mobile, show prompt immediately
+        if (isMobileDevice() && isChromeOrBrave()) {
+          setShowMobilePlayPrompt(true);
+        }
       }
     };
 
@@ -1276,13 +1308,22 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         autoplayAttemptedRef.current = true;
         // Also set mobile state to ensure prompt shows
         setIsMobile(true);
+        // For Chrome/Brave, always show prompt on initial sync
+        if (isChromeOrBrave()) {
+          setShowMobilePlayPrompt(true);
+        }
       }
       
       // For mobile users, always show prompt when video is paused
+      // Especially important for Chrome/Brave
       if (isMobileDevice() && !data.isPlaying) {
         setIsMobile(true);
         setVideoPaused(true);
         setShowMobilePlayPrompt(true);
+        // For Chrome/Brave, ensure prompt is visible
+        if (isChromeOrBrave()) {
+          setShowMobilePlayPrompt(true);
+        }
       }
       
       // Wait for video to be ready, then sync
@@ -2257,6 +2298,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             controls
             controlsList="nodownload"
             playsInline
+            muted={false}
             style={{
               width: '100%',
               height: 'auto',
@@ -2265,7 +2307,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               touchAction: 'pan-y pinch-zoom',
               // Ensure controls are always visible on mobile
               WebkitAppearance: 'none',
-              appearance: 'none'
+              appearance: 'none',
+              // For Chrome/Brave, ensure video is interactive
+              pointerEvents: 'auto'
             }}
             preload="metadata"
             onPlay={() => {
@@ -2289,14 +2333,49 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               // Update paused state when video metadata loads
               if (videoRef.current) {
                 setVideoPaused(videoRef.current.paused);
+                // For Chrome/Brave on mobile, show prompt immediately when metadata loads
+                if (isMobileDevice() && isChromeOrBrave() && videoRef.current.paused) {
+                  setTimeout(() => {
+                    setShowMobilePlayPrompt(true);
+                  }, 200);
+                }
               }
             }}
-            onClick={() => {
+            onCanPlay={() => {
+              // For Chrome/Brave on mobile, ensure prompt shows when video can play
+              if (isMobileDevice() && isChromeOrBrave() && videoRef.current && videoRef.current.paused) {
+                setShowMobilePlayPrompt(true);
+                setVideoPaused(true);
+              }
+            }}
+            onClick={(e) => {
               // User interaction detected - try to play if blocked
-              if (autoplayBlocked && videoRef.current && videoRef.current.paused) {
-                videoRef.current.play().catch(err => {
-                  console.error('Manual play failed:', err);
-                });
+              // For Chrome/Brave, this is critical for autoplay
+              if (videoRef.current && videoRef.current.paused) {
+                const playPromise = videoRef.current.play();
+                if (playPromise !== undefined) {
+                  playPromise.then(() => {
+                    setAutoplayBlocked(false);
+                    setShowMobilePlayPrompt(false);
+                    setVideoPaused(false);
+                  }).catch(err => {
+                    console.error('Manual play failed:', err);
+                    if (err.name === 'NotAllowedError') {
+                      // Chrome/Brave blocked autoplay - show prompt
+                      if (isMobileDevice() && isChromeOrBrave()) {
+                        setShowMobilePlayPrompt(true);
+                        setAutoplayBlocked(true);
+                      }
+                    }
+                  });
+                }
+              }
+            }}
+            onTouchStart={(e) => {
+              // For Chrome/Brave, register touch as user interaction
+              if (isChromeOrBrave() && videoRef.current && videoRef.current.paused) {
+                // Touch on video element itself can help unlock autoplay
+                // Don't prevent default - let it bubble to video controls
               }
             }}
           >
@@ -2305,38 +2384,62 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           </video>
           
           {/* Mobile Play Prompt Overlay - Show when video is paused on mobile */}
+          {/* Always show for Chrome/Brave on mobile when paused */}
           {isMobile && videoPaused && videoRef.current && (
             <div
               onTouchStart={(e) => {
                 e.stopPropagation();
-                // Prevent default to avoid triggering video controls
-                e.preventDefault();
+                // For Chrome/Brave, we need to be more careful with preventDefault
+                // Only prevent if it's not a video control interaction
+                if (!e.target.closest('video')) {
+                  e.preventDefault();
+                }
               }}
               onTouchEnd={(e) => {
                 e.stopPropagation();
-                e.preventDefault();
-                if (videoRef.current) {
-                  videoRef.current.play().then(() => {
-                    setShowMobilePlayPrompt(false);
-                    setAutoplayBlocked(false);
-                  }).catch(err => {
-                    console.error('Play failed:', err);
-                    // Still show the prompt if play fails
-                    setShowMobilePlayPrompt(true);
-                  });
+                // Don't prevent default on touchEnd for Chrome/Brave - let it bubble
+                const handlePlay = () => {
+                  if (videoRef.current) {
+                    // Use a small delay for Chrome/Brave to ensure user interaction is registered
+                    const playPromise = videoRef.current.play();
+                    if (playPromise !== undefined) {
+                      playPromise.then(() => {
+                        setShowMobilePlayPrompt(false);
+                        setAutoplayBlocked(false);
+                        setVideoPaused(false);
+                      }).catch(err => {
+                        console.error('Play failed:', err);
+                        // Still show the prompt if play fails
+                        setShowMobilePlayPrompt(true);
+                      });
+                    }
+                  }
+                };
+                
+                // For Chrome/Brave, use immediate execution
+                if (isChromeOrBrave()) {
+                  handlePlay();
+                } else {
+                  e.preventDefault();
+                  handlePlay();
                 }
               }}
               onClick={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
                 if (videoRef.current) {
-                  videoRef.current.play().then(() => {
-                    setShowMobilePlayPrompt(false);
-                    setAutoplayBlocked(false);
-                  }).catch(err => {
-                    console.error('Play failed:', err);
-                    setShowMobilePlayPrompt(true);
-                  });
+                  // For Chrome/Brave, ensure play is called directly from user interaction
+                  const playPromise = videoRef.current.play();
+                  if (playPromise !== undefined) {
+                    playPromise.then(() => {
+                      setShowMobilePlayPrompt(false);
+                      setAutoplayBlocked(false);
+                      setVideoPaused(false);
+                    }).catch(err => {
+                      console.error('Play failed:', err);
+                      setShowMobilePlayPrompt(true);
+                    });
+                  }
                 }
               }}
               style={{
