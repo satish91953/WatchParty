@@ -28,6 +28,15 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const youtubeSyncInProgress = useRef(false);
   const [isHLS, setIsHLS] = useState(false);
   const hlsRef = useRef(null);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [showMobilePlayPrompt, setShowMobilePlayPrompt] = useState(false);
+  const autoplayAttemptedRef = useRef(false);
+  
+  // Detect mobile device
+  const isMobileDevice = () => {
+    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+           (window.innerWidth <= 768 && 'ontouchstart' in window);
+  };
   
   // Refs to prevent sync loops
   const syncTimeoutRef = useRef(null);
@@ -431,6 +440,14 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         // Don't auto-play - browsers block it. User needs to click play button.
         // The video controls will handle play/pause
       }
+      
+      // For mobile users, if autoplay was attempted and video is paused, show prompt
+      if (isMobileDevice() && autoplayAttemptedRef.current && video.paused) {
+        setTimeout(() => {
+          setShowMobilePlayPrompt(true);
+          setAutoplayBlocked(true);
+        }, 500); // Small delay to ensure video is fully ready
+      }
     };
 
     // Wait for video to be ready (skip for HLS as it handles its own ready event)
@@ -725,6 +742,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                   console.error('HLS sync play failed:', err);
                 } else if (err.name === 'NotAllowedError') {
                   console.log('ℹ️ Autoplay blocked - user interaction required');
+                  setAutoplayBlocked(true);
+                  if (isMobileDevice()) {
+                    setShowMobilePlayPrompt(true);
+                    autoplayAttemptedRef.current = true;
+                  }
                 }
               });
             }, 300); // Increased delay for HLS buffering
@@ -740,6 +762,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                   console.error('Sync play failed:', err);
                 } else if (err.name === 'NotAllowedError') {
                   console.log('ℹ️ Autoplay blocked - user interaction required');
+                  setAutoplayBlocked(true);
+                  if (isMobileDevice()) {
+                    setShowMobilePlayPrompt(true);
+                    autoplayAttemptedRef.current = true;
+                  }
                 }
               });
             }
@@ -756,11 +783,19 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               console.error('Sync play failed:', err);
             } else if (err.name === 'NotAllowedError') {
               console.log('ℹ️ Autoplay blocked - user interaction required');
+              setAutoplayBlocked(true);
+              // Show mobile play prompt if on mobile
+              if (isMobileDevice()) {
+                setShowMobilePlayPrompt(true);
+                autoplayAttemptedRef.current = true;
+              }
             }
             // NotAllowedError is expected for autoplay - user will need to click play
           });
         } else {
           console.log('✅ Video already playing');
+          setAutoplayBlocked(false);
+          setShowMobilePlayPrompt(false);
         }
       } catch (error) {
         console.error('Error in syncVideoPlay:', error);
@@ -1185,6 +1220,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         setVideoTitle(data.videoTitle || 'Video');
       }
       
+      // For mobile users joining when video is already playing, show prompt
+      if (data.isPlaying && isMobileDevice() && data.isInitialSync) {
+        // Set a flag to show prompt after video loads
+        autoplayAttemptedRef.current = true;
+      }
+      
       // Wait for video to be ready, then sync
       const syncToState = () => {
         if (isYouTube && youtubePlayerRef.current) {
@@ -1221,7 +1262,18 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 
                 setTimeout(() => {
                   if (data.isPlaying && video.paused) {
-                    video.play().catch(err => console.error('HLS play error:', err));
+                    video.play().catch(err => {
+                      if (err.name === 'NotAllowedError') {
+                        console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
+                        setAutoplayBlocked(true);
+                        if (isMobileDevice()) {
+                          setShowMobilePlayPrompt(true);
+                          autoplayAttemptedRef.current = true;
+                        }
+                      } else {
+                        console.error('HLS play error:', err);
+                      }
+                    });
                   } else if (!data.isPlaying && !video.paused) {
                     video.pause();
                   }
@@ -1256,7 +1308,18 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             
             setTimeout(() => {
               if (data.isPlaying && video.paused) {
-                video.play().catch(err => console.error('Play error:', err));
+                video.play().catch(err => {
+                  if (err.name === 'NotAllowedError') {
+                    console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
+                    setAutoplayBlocked(true);
+                    if (isMobileDevice()) {
+                      setShowMobilePlayPrompt(true);
+                      autoplayAttemptedRef.current = true;
+                    }
+                  } else {
+                    console.error('Play error:', err);
+                  }
+                });
               } else if (!data.isPlaying && !video.paused) {
                 video.pause();
               }
@@ -1273,7 +1336,18 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 video.currentTime = data.currentTime || 0;
                 setTimeout(() => {
                   if (data.isPlaying) {
-                    video.play().catch(err => console.error('Play error:', err));
+                    video.play().catch(err => {
+                      if (err.name === 'NotAllowedError') {
+                        console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
+                        setAutoplayBlocked(true);
+                        if (isMobileDevice()) {
+                          setShowMobilePlayPrompt(true);
+                          autoplayAttemptedRef.current = true;
+                        }
+                      } else {
+                        console.error('Play error:', err);
+                      }
+                    });
                   }
                   if (data.playbackSpeed) {
                     video.playbackRate = data.playbackSpeed;
@@ -2118,22 +2192,109 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             </div>
           </div>
         ) : (
-        <video
-          ref={videoRef}
-          controls
-          playsInline
-          style={{
-            width: '100%',
-            height: 'auto',
-            minHeight: '300px',
-            display: 'block',
-            touchAction: 'pan-y pinch-zoom'
-          }}
-          preload="metadata"
-        >
-          <source src={videoUrl} type={getVideoType(videoUrl)} />
-          Your browser does not support the video tag.
-        </video>
+        <div style={{ position: 'relative', width: '100%' }}>
+          <video
+            ref={videoRef}
+            controls
+            controlsList="nodownload"
+            playsInline
+            style={{
+              width: '100%',
+              height: 'auto',
+              minHeight: '300px',
+              display: 'block',
+              touchAction: 'pan-y pinch-zoom',
+              // Ensure controls are always visible on mobile
+              WebkitAppearance: 'none',
+              appearance: 'none'
+            }}
+            preload="metadata"
+            onPlay={() => {
+              setAutoplayBlocked(false);
+              setShowMobilePlayPrompt(false);
+            }}
+            onClick={() => {
+              // User interaction detected - try to play if blocked
+              if (autoplayBlocked && videoRef.current && videoRef.current.paused) {
+                videoRef.current.play().catch(err => {
+                  console.error('Manual play failed:', err);
+                });
+              }
+            }}
+          >
+            <source src={videoUrl} type={getVideoType(videoUrl)} />
+            Your browser does not support the video tag.
+          </video>
+          
+          {/* Mobile Play Prompt Overlay */}
+          {showMobilePlayPrompt && isMobileDevice() && (
+            <div
+              onClick={(e) => {
+                e.stopPropagation();
+                if (videoRef.current) {
+                  videoRef.current.play().then(() => {
+                    setShowMobilePlayPrompt(false);
+                    setAutoplayBlocked(false);
+                  }).catch(err => {
+                    console.error('Play failed:', err);
+                  });
+                }
+              }}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                background: 'rgba(0, 0, 0, 0.85)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                zIndex: 10,
+                cursor: 'pointer',
+                borderRadius: '8px'
+              }}
+            >
+              <div style={{
+                textAlign: 'center',
+                padding: '20px',
+                color: '#fff'
+              }}>
+                <div style={{
+                  fontSize: '48px',
+                  marginBottom: '16px'
+                }}>
+                  ▶️
+                </div>
+                <div style={{
+                  fontSize: '18px',
+                  fontWeight: 'bold',
+                  marginBottom: '8px'
+                }}>
+                  Tap to Play Video
+                </div>
+                <div style={{
+                  fontSize: '14px',
+                  color: '#ccc',
+                  marginTop: '8px'
+                }}>
+                  Mobile browsers require user interaction to play videos
+                </div>
+                <div style={{
+                  fontSize: '12px',
+                  color: '#999',
+                  marginTop: '12px',
+                  padding: '8px',
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  borderRadius: '4px'
+                }}>
+                  💡 Tap anywhere on this overlay to start playback
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
         )}
       </div>
 
