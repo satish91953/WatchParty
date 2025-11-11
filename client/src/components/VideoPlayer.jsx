@@ -1391,24 +1391,36 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             const targetTime = data.currentTime || 0;
             const timeDiff = Math.abs(video.currentTime - targetTime);
             
+            // Always sync time if difference is significant (even if already playing)
             if (timeDiff > 0.5) {
+              console.log(`🔄 Syncing time: ${video.currentTime.toFixed(2)} -> ${targetTime.toFixed(2)}`);
               video.currentTime = targetTime;
             }
             
             setTimeout(() => {
-              if (data.isPlaying && video.paused) {
-                video.play().catch(err => {
-                  if (err.name === 'NotAllowedError') {
-                    console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
-                    setAutoplayBlocked(true);
-                    if (isMobileDevice()) {
-                      setShowMobilePlayPrompt(true);
-                      autoplayAttemptedRef.current = true;
+              // For mobile after user interaction, video might already be playing
+              // Still sync time and playback state
+              if (data.isPlaying) {
+                if (video.paused) {
+                  video.play().catch(err => {
+                    if (err.name === 'NotAllowedError') {
+                      console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
+                      setAutoplayBlocked(true);
+                      if (isMobileDevice()) {
+                        setShowMobilePlayPrompt(true);
+                        autoplayAttemptedRef.current = true;
+                      }
+                    } else {
+                      console.error('Play error:', err);
                     }
-                  } else {
-                    console.error('Play error:', err);
+                  });
+                } else {
+                  // Video already playing - ensure time is synced
+                  const currentTimeDiff = Math.abs(video.currentTime - targetTime);
+                  if (currentTimeDiff > 0.5) {
+                    video.currentTime = targetTime;
                   }
-                });
+                }
               } else if (!data.isPlaying && !video.paused) {
                 video.pause();
               }
@@ -1422,22 +1434,41 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             // Wait for video to load
             const applyState = () => {
               if (video.readyState >= 2 && videoInitialized.current) {
-                video.currentTime = data.currentTime || 0;
+                const targetTime = data.currentTime || 0;
+                const timeDiff = Math.abs(video.currentTime - targetTime);
+                
+                // Sync time if needed
+                if (timeDiff > 0.5) {
+                  video.currentTime = targetTime;
+                }
+                
                 setTimeout(() => {
+                  // For mobile after user interaction, video might already be playing
                   if (data.isPlaying) {
-                    video.play().catch(err => {
-                      if (err.name === 'NotAllowedError') {
-                        console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
-                        setAutoplayBlocked(true);
-                        if (isMobileDevice()) {
-                          setShowMobilePlayPrompt(true);
-                          autoplayAttemptedRef.current = true;
+                    if (video.paused) {
+                      video.play().catch(err => {
+                        if (err.name === 'NotAllowedError') {
+                          console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
+                          setAutoplayBlocked(true);
+                          if (isMobileDevice()) {
+                            setShowMobilePlayPrompt(true);
+                            autoplayAttemptedRef.current = true;
+                          }
+                        } else {
+                          console.error('Play error:', err);
                         }
-                      } else {
-                        console.error('Play error:', err);
+                      });
+                    } else {
+                      // Video already playing - ensure time is synced
+                      const currentTimeDiff = Math.abs(video.currentTime - targetTime);
+                      if (currentTimeDiff > 0.5) {
+                        video.currentTime = targetTime;
                       }
-                    });
+                    }
+                  } else if (!data.isPlaying && !video.paused) {
+                    video.pause();
                   }
+                  
                   if (data.playbackSpeed) {
                     video.playbackRate = data.playbackSpeed;
                     setPlaybackSpeed(data.playbackSpeed);
@@ -2285,12 +2316,24 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               // User interaction detected - try to play if blocked
               // For Chrome/Brave, this is critical for autoplay
               if (videoRef.current && videoRef.current.paused) {
+                // Request sync state when user interacts on mobile
+                if (isMobileDevice() && socket && roomId) {
+                  socket.emit('request_video_state', { roomId });
+                }
+                
                 const playPromise = videoRef.current.play();
                 if (playPromise !== undefined) {
                   playPromise.then(() => {
                     setAutoplayBlocked(false);
                     setShowMobilePlayPrompt(false);
                     setVideoPaused(false);
+                    
+                    // After play starts, sync to room state
+                    if (isMobileDevice() && socket && roomId) {
+                      setTimeout(() => {
+                        socket.emit('request_video_state', { roomId });
+                      }, 500);
+                    }
                   }).catch(err => {
                     console.error('Manual play failed:', err);
                     if (err.name === 'NotAllowedError') {
@@ -2332,7 +2375,10 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 e.stopPropagation();
                 // Don't prevent default on touchEnd for Chrome/Brave - let it bubble
                 const handlePlay = () => {
-                  if (videoRef.current) {
+                  if (videoRef.current && socket && roomId) {
+                    // Request current video state to sync after user interaction
+                    socket.emit('request_video_state', { roomId });
+                    
                     // Use a small delay for Chrome/Brave to ensure user interaction is registered
                     const playPromise = videoRef.current.play();
                     if (playPromise !== undefined) {
@@ -2340,6 +2386,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                         setShowMobilePlayPrompt(false);
                         setAutoplayBlocked(false);
                         setVideoPaused(false);
+                        
+                        // After play starts, wait a moment then sync to room state
+                        setTimeout(() => {
+                          if (socket && roomId) {
+                            socket.emit('request_video_state', { roomId });
+                          }
+                        }, 500);
                       }).catch(err => {
                         console.error('Play failed:', err);
                         // Still show the prompt if play fails
@@ -2360,7 +2413,10 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               onClick={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
-                if (videoRef.current) {
+                if (videoRef.current && socket && roomId) {
+                  // Request current video state to sync after user interaction
+                  socket.emit('request_video_state', { roomId });
+                  
                   // For Chrome/Brave, ensure play is called directly from user interaction
                   const playPromise = videoRef.current.play();
                   if (playPromise !== undefined) {
@@ -2368,6 +2424,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                       setShowMobilePlayPrompt(false);
                       setAutoplayBlocked(false);
                       setVideoPaused(false);
+                      
+                      // After play starts, wait a moment then sync to room state
+                      setTimeout(() => {
+                        if (socket && roomId) {
+                          socket.emit('request_video_state', { roomId });
+                        }
+                      }, 500);
                     }).catch(err => {
                       console.error('Play failed:', err);
                       setShowMobilePlayPrompt(true);
