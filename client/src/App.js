@@ -23,6 +23,8 @@ function App() {
   const [timerSeconds, setTimerSeconds] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [pendingRoomFromUrl, setPendingRoomFromUrl] = useState(null);
+  const [showRoomClosedModal, setShowRoomClosedModal] = useState(false);
+  const [roomClosedMessage, setRoomClosedMessage] = useState('');
   const videoPlayerRef = useRef();
 
   useEffect(() => {
@@ -46,6 +48,7 @@ function App() {
       // Check if we have a saved room to reconnect to
       const savedRoomId = localStorage.getItem('watchParty_roomId');
       const savedRoomData = localStorage.getItem('watchParty_roomData');
+      const savedUsername = localStorage.getItem('watchParty_username') || '';
       
       // Also check URL parameter for room code
       const urlParams = new URLSearchParams(window.location.search);
@@ -53,53 +56,52 @@ function App() {
       
       const roomToJoin = urlRoomId || savedRoomId;
       
-      if (roomToJoin && savedRoomData) {
-        try {
-          const roomData = JSON.parse(savedRoomData);
-          console.log('Reconnecting to room:', roomToJoin);
-          setStatus('Reconnecting to room...');
-          
-          // Rejoin the room with saved username
-          const savedUsername = localStorage.getItem('watchParty_username') || '';
-          // If no saved username or it's still "Guest-", don't auto-rejoin
-          if (!savedUsername || savedUsername.trim() === '' || savedUsername.startsWith('Guest-')) {
-            setStatus('Connected to server! Please enter your name to join a room.');
-            return;
-          }
-          newSocket.emit('join_room', roomToJoin, { username: savedUsername.trim() }, (response) => {
-            if (response.success) {
-              setRoomId(roomToJoin);
-              setRoomData(response.room);
-              setUsers(response.room.users?.filter(u => u.userId !== newSocket.id) || []);
-              setStatus(`🎉 Reconnected to room: ${response.room.name || roomToJoin}`);
-              
-              // Update saved room data
-              localStorage.setItem('watchParty_roomId', roomToJoin);
-              localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
-              
-              // Clean URL
-              window.history.replaceState({}, '', window.location.pathname);
+      // Auto-rejoin if we have room ID and valid username
+      if (roomToJoin && savedUsername && savedUsername.trim() !== '' && !savedUsername.startsWith('Guest-')) {
+        console.log('🔄 Auto-rejoining room:', roomToJoin, 'with username:', savedUsername);
+        setStatus('Reconnecting to room...');
+        
+        newSocket.emit('join_room', roomToJoin, { username: savedUsername.trim() }, (response) => {
+          if (response.success) {
+            setRoomId(roomToJoin);
+            setRoomData(response.room);
+            setUsers(response.room.users?.filter(u => u.userId !== newSocket.id) || []);
+            setStatus(`🎉 Reconnected to room: ${response.room.name || roomToJoin}`);
+            
+            // Update saved room data
+            localStorage.setItem('watchParty_roomId', roomToJoin);
+            localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
+            
+            // Clean URL
+            window.history.replaceState({}, '', window.location.pathname);
+          } else {
+            // Room might not exist anymore, clear saved data
+            console.log('❌ Failed to reconnect:', response.message);
+            localStorage.removeItem('watchParty_roomId');
+            localStorage.removeItem('watchParty_roomData');
+            
+            // If room was deleted, show the room closed modal
+            if (response.message && (response.message.includes('closed') || response.message.includes('deleted'))) {
+              setRoomClosedMessage(response.message);
+              setShowRoomClosedModal(true);
             } else {
-              // Room might not exist anymore, clear saved data
-              console.log('Failed to reconnect:', response.message);
-              localStorage.removeItem('watchParty_roomId');
-              localStorage.removeItem('watchParty_roomData');
               setStatus('Connected to server! Ready to create or join a room.');
             }
-          });
-        } catch (error) {
-          console.error('Error parsing saved room data:', error);
-          localStorage.removeItem('watchParty_roomId');
-          localStorage.removeItem('watchParty_roomData');
-          setStatus('Connected to server! Ready to create or join a room.');
-        }
-      } else if (urlRoomId && !savedRoomData) {
+          }
+        });
+      } else if (urlRoomId && (!savedUsername || savedUsername.trim() === '' || savedUsername.startsWith('Guest-'))) {
         // Store room ID from URL to show name popup
-        console.log('Room ID from URL:', urlRoomId);
+        console.log('📋 Room ID from URL:', urlRoomId);
         setPendingRoomFromUrl(urlRoomId);
         setStatus('Please enter your name to join the room');
         // Clean URL immediately
         window.history.replaceState({}, '', window.location.pathname);
+      } else if (savedRoomId && (!savedUsername || savedUsername.trim() === '' || savedUsername.startsWith('Guest-'))) {
+        // Have room ID but no valid username - clear room data
+        console.log('⚠️ Have room ID but no valid username, clearing saved room data');
+        localStorage.removeItem('watchParty_roomId');
+        localStorage.removeItem('watchParty_roomData');
+        setStatus('Connected to server! Ready to create or join a room.');
       } else {
         setStatus('Connected to server! Ready to create or join a room.');
       }
@@ -118,10 +120,12 @@ function App() {
       
       // Try to rejoin room if we were in one
       const savedRoomId = localStorage.getItem('watchParty_roomId');
-      if (savedRoomId) {
+      const savedUsername = localStorage.getItem('watchParty_username') || '';
+      
+      if (savedRoomId && savedUsername && savedUsername.trim() !== '' && !savedUsername.startsWith('Guest-')) {
         console.log('Rejoining room after reconnect:', savedRoomId);
         setStatus('Reconnecting to room...');
-        newSocket.emit('join_room', savedRoomId, (response) => {
+        newSocket.emit('join_room', savedRoomId, { username: savedUsername.trim() }, (response) => {
           if (response.success) {
             setRoomId(savedRoomId);
             setRoomData(response.room);
@@ -129,6 +133,9 @@ function App() {
             setStatus(`🎉 Reconnected to room: ${response.room.name || savedRoomId}`);
             localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
           } else {
+            console.log('Failed to reconnect:', response.message);
+            localStorage.removeItem('watchParty_roomId');
+            localStorage.removeItem('watchParty_roomData');
             setStatus('Connected to server! Ready to create or join a room.');
           }
         });
@@ -220,6 +227,12 @@ function App() {
         localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
       } else {
         setStatus(`❌ Failed to join room: ${response.message}`);
+        
+        // Show popup if room is closed/deleted
+        if (response.message && (response.message.includes('closed') || response.message.includes('deleted'))) {
+          setRoomClosedMessage(response.message);
+          setShowRoomClosedModal(true);
+        }
       }
     });
   };
@@ -357,12 +370,35 @@ function App() {
 
     socket.on('room_timer_start', handleTimerStart);
     socket.on('room_timer_stop', handleTimerStop);
+    
+    // Handle room deletion when last user leaves
+    const handleRoomDeleted = (data) => {
+      if (data.roomId === roomId) {
+        setStatus('Room deleted - all users have left');
+        setRoomId('');
+        setRoomData(null);
+        setUsers([]);
+        
+        // Clear saved room data
+        localStorage.removeItem('watchParty_roomId');
+        localStorage.removeItem('watchParty_roomData');
+        
+        // Show alert and redirect after a short delay
+        setTimeout(() => {
+          alert('Room has been deleted because all users left.');
+          window.location.reload();
+        }, 1000);
+      }
+    };
+    
+    socket.on('room_deleted', handleRoomDeleted);
 
     return () => {
       socket.off('room_timer_start', handleTimerStart);
       socket.off('room_timer_stop', handleTimerStop);
+      socket.off('room_deleted', handleRoomDeleted);
     };
-  }, [socket, roomTimer]);
+  }, [socket, roomTimer, roomId]);
 
   const connectionStatus = getConnectionStatus();
 
@@ -501,7 +537,7 @@ function App() {
           {roomId && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
               <div style={{
-                background: '#007bff',
+                background: 'var(--info-color)',
                 color: 'white',
                 padding: '5px 12px',
                 borderRadius: '15px',
@@ -540,7 +576,7 @@ function App() {
         </div>
         
         {roomData?.name && (
-          <div style={{ marginTop: '8px', color: '#ccc' }}>
+          <div style={{ marginTop: '8px', color: 'var(--text-secondary)' }}>
             <strong>Room:</strong> {roomData.name}
           </div>
         )}
@@ -548,7 +584,8 @@ function App() {
       </div>
 
       {!roomId ? (
-        /* Room Selection */
+        <>
+        {/* Room Selection */}
         <RoomControls
           onCreateRoom={createRoom}
           onJoinRoom={joinRoom}
@@ -556,6 +593,120 @@ function App() {
           pendingRoomFromUrl={pendingRoomFromUrl}
           onPendingRoomHandled={() => setPendingRoomFromUrl(null)}
         />
+        
+        {/* Room Closed Modal */}
+        {showRoomClosedModal && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: isDark ? 'rgba(0, 0, 0, 0.75)' : 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 10000,
+            backdropFilter: 'blur(6px)'
+          }}
+          onClick={() => setShowRoomClosedModal(false)}
+          >
+            <div style={{
+              background: isDark 
+                ? 'linear-gradient(135deg, rgba(26, 26, 31, 0.98) 0%, rgba(37, 37, 45, 0.98) 100%)'
+                : 'linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 249, 250, 0.98) 100%)',
+              padding: '36px',
+              borderRadius: '24px',
+              border: '2px solid var(--border-color)',
+              boxShadow: isDark 
+                ? '0 20px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1) inset'
+                : '0 20px 60px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.05) inset',
+              maxWidth: '450px',
+              width: '90%',
+              position: 'relative',
+              zIndex: 10001,
+              animation: 'fadeIn 0.3s ease-out'
+            }}
+            onClick={(e) => e.stopPropagation()}
+            >
+              <div style={{
+                textAlign: 'center',
+                marginBottom: '24px'
+              }}>
+                <div style={{
+                  fontSize: '64px',
+                  marginBottom: '16px',
+                  animation: 'pulse 2s infinite'
+                }}>
+                  🚫
+                </div>
+                <h3 style={{
+                  margin: '0 0 12px 0',
+                  fontSize: '26px',
+                  fontWeight: '800',
+                  color: 'var(--text-primary)',
+                  background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  backgroundClip: 'text'
+                }}>
+                  Room Closed
+                </h3>
+                <p style={{
+                  margin: '0',
+                  fontSize: '15px',
+                  color: 'var(--text-secondary)',
+                  lineHeight: '1.6'
+                }}>
+                  {roomClosedMessage || 'This room has been closed or deleted because all users left.'}
+                </p>
+              </div>
+              
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '12px'
+              }}>
+                <button
+                  onClick={() => setShowRoomClosedModal(false)}
+                  className="btn-info"
+                  style={{
+                    width: '100%',
+                    padding: '14px 20px',
+                    fontSize: '16px',
+                    fontWeight: '700',
+                    borderRadius: '12px',
+                    border: 'none',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s ease',
+                    background: 'var(--gradient-info)',
+                    color: 'white',
+                    boxShadow: '0 4px 12px rgba(59, 130, 246, 0.4)'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-2px)';
+                    e.currentTarget.style.boxShadow = '0 6px 16px rgba(59, 130, 246, 0.5)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = '0 4px 12px rgba(59, 130, 246, 0.4)';
+                  }}
+                >
+                  OK, Got It
+                </button>
+                <p style={{
+                  margin: '8px 0 0 0',
+                  fontSize: '13px',
+                  color: 'var(--text-muted)',
+                  textAlign: 'center'
+                }}>
+                  💡 You can create a new room or join another one
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+        </>
       ) : (
         /* Main Room Interface - Professional Dashboard Layout */
         <div className="dashboard-layout">
@@ -570,11 +721,11 @@ function App() {
                 <div style={{ 
                   padding: '10px 12px',
                   background: roomData?.host === userId ? 
-                    'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' :
-                    'linear-gradient(135deg, rgba(0, 123, 255, 0.2), rgba(0, 86, 179, 0.2))',
+                    (isDark ? 'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' : 'linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(224, 168, 0, 0.15))') :
+                    (isDark ? 'linear-gradient(135deg, rgba(0, 123, 255, 0.2), rgba(0, 86, 179, 0.2))' : 'linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(37, 99, 235, 0.15))'),
                   borderRadius: '8px',
                   border: '1px solid',
-                  borderColor: roomData?.host === userId ? '#ffc107' : '#007bff',
+                  borderColor: roomData?.host === userId ? 'var(--warning-color)' : 'var(--info-color)',
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
@@ -583,27 +734,27 @@ function App() {
                   <span style={{
                     width: '10px',
                     height: '10px',
-                    background: '#28a745',
+                    background: 'var(--success-color)',
                     borderRadius: '50%',
-                    border: '2px solid white',
-                    boxShadow: '0 0 0 2px var(--bg-secondary)'
+                    border: `2px solid ${isDark ? 'white' : 'var(--bg-secondary)'}`,
+                    boxShadow: `0 0 0 2px var(--bg-secondary)`
                   }}></span>
-                  <span style={{ flex: 1, fontWeight: '600', fontSize: '14px' }}>
+                  <span style={{ flex: 1, fontWeight: '600', fontSize: '14px', color: 'var(--text-primary)' }}>
                     You {roomData?.host === userId && '👑'}
                   </span>
                   {roomData?.host === userId && (
-                    <span style={{ fontSize: '12px', color: '#ffc107' }}>HOST</span>
+                    <span style={{ fontSize: '12px', color: 'var(--warning-color)' }}>HOST</span>
                   )}
                 </div>
                 {users.map(user => (
                   <div key={user.userId} style={{ 
                     padding: '10px 12px',
                     background: user.isHost ? 
-                      'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' :
-                      'linear-gradient(135deg, rgba(40, 167, 69, 0.2), rgba(32, 201, 151, 0.2))',
+                      (isDark ? 'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' : 'linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(224, 168, 0, 0.15))') :
+                      (isDark ? 'linear-gradient(135deg, rgba(40, 167, 69, 0.2), rgba(32, 201, 151, 0.2))' : 'linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(5, 150, 105, 0.15))'),
                     borderRadius: '8px',
                     border: '1px solid',
-                    borderColor: user.isHost ? '#ffc107' : '#28a745',
+                    borderColor: user.isHost ? 'var(--warning-color)' : 'var(--success-color)',
                     display: 'flex',
                     alignItems: 'center',
                     gap: '8px'
@@ -611,16 +762,16 @@ function App() {
                     <span style={{
                       width: '10px',
                       height: '10px',
-                      background: '#28a745',
+                      background: 'var(--success-color)',
                       borderRadius: '50%',
-                      border: '2px solid white',
-                      boxShadow: '0 0 0 2px var(--bg-secondary)'
+                      border: `2px solid ${isDark ? 'white' : 'var(--bg-secondary)'}`,
+                      boxShadow: `0 0 0 2px var(--bg-secondary)`
                     }}></span>
-                    <span style={{ flex: 1, fontWeight: '600', fontSize: '14px' }}>
+                    <span style={{ flex: 1, fontWeight: '600', fontSize: '14px', color: 'var(--text-primary)' }}>
                       {user.username} {user.isHost && '👑'}
                     </span>
                     {user.isHost && (
-                      <span style={{ fontSize: '12px', color: '#ffc107' }}>HOST</span>
+                      <span style={{ fontSize: '12px', color: 'var(--warning-color)' }}>HOST</span>
                     )}
                   </div>
                 ))}

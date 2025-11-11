@@ -715,8 +715,8 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       
       console.log('🔄 Received video URL change:', data.videoUrl);
       
-      if (data.videoUrl.startsWith('blob:')) {
-        alert(`${data.initiatedBy} loaded a local video file. You'll need to load the same file on your device to sync.`);
+      // Blob URLs can't be shared - skip them
+      if (data.videoUrl.startsWith('blob:') || data.isBlobUrl) {
         return;
       }
       
@@ -949,7 +949,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       return;
     }
 
-    // Any user can upload to server - everyone gets access
+    // Upload to server - one user uploads, everyone can stream
     await uploadVideoToServer(file);
     
     if (fileInputRef.current) {
@@ -2004,61 +2004,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           </div>
         )}
         
-        {/* Local File Upload (Legacy - for testing only) */}
-        <div style={{ marginBottom: '15px' }}>
-            <details style={{ background: '#333', padding: '10px', borderRadius: '4px' }}>
-              <summary style={{ cursor: 'pointer', color: '#ccc' }}>
-                📁 Upload Local Video (Advanced)
-              </summary>
-              <div style={{ marginTop: '10px' }}>
-                <input
-                  type="file"
-                  accept="video/*"
-                  onChange={handleFileUpload}
-                  style={{ marginBottom: '5px' }}
-                />
-                <div style={{ fontSize: '12px', color: '#ccc' }}>
-                  Note: Local videos won't sync with other users. Use only for testing.
-                </div>
-              </div>
-            </details>
-          </div>
-
-        {/* URL Input */}
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '15px' }}>
-          <input
-            type="url"
-            placeholder="Enter video URL or YouTube link..."
-            value={newVideoUrl}
-            onChange={(e) => setNewVideoUrl(e.target.value)}
-            style={{ flex: 1 }}
-            onKeyPress={(e) => e.key === 'Enter' && loadNewVideo()}
-          />
-          <button 
-            onClick={loadNewVideo}
-            disabled={!newVideoUrl.trim() || isLoading}
-            className="btn-info"
-          >
-            {isLoading ? 'Loading...' : isYouTubeUrl(newVideoUrl) ? '📺 Load YouTube' : '🌐 Load URL'}
-          </button>
-        </div>
-        
-        {isYouTubeUrl(newVideoUrl) && (
-          <div style={{
-            background: 'linear-gradient(135deg, #ff0000, #cc0000)',
-            color: 'white',
-            padding: '10px 15px',
-            borderRadius: '8px',
-            marginBottom: '15px',
-            fontSize: '13px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px'
-          }}>
-            <span>📺</span>
-            <span>YouTube video detected! Paste any YouTube URL to watch together.</span>
-          </div>
-        )}
 
         {/* Sample Videos */}
         <div style={{ marginBottom: '15px' }}>

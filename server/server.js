@@ -25,10 +25,19 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Ensure uploads directory exists
+const uploadsDir = 'uploads/videos';
+if (!fs.existsSync('uploads')) {
+  fs.mkdirSync('uploads', { recursive: true });
+}
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
 // Configure multer for video uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/videos/');
+    cb(null, uploadsDir);
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -73,6 +82,9 @@ const io = socketIo(server, {
 
 // Store active socket connections
 const activeConnections = new Map();
+
+// Store pending room deletions (for grace period on page refresh)
+const pendingRoomDeletions = new Map();
 
 // Authentication middleware for socket
 io.use(async (socket, next) => {
@@ -206,10 +218,20 @@ io.on('connection', (socket) => {
       
       username = username.trim();
       
+      // Cancel any pending deletion for this room (user is reconnecting)
+      if (pendingRoomDeletions.has(roomId)) {
+        clearTimeout(pendingRoomDeletions.get(roomId));
+        pendingRoomDeletions.delete(roomId);
+        console.log(`Cancelled pending deletion for room ${roomId} - user reconnecting`);
+      }
+      
       const room = await Room.findOne({ roomId, isActive: true });
       
       if (!room) {
-        if (actualCallback) actualCallback({ success: false, message: 'Room not found or inactive' });
+        if (actualCallback) actualCallback({ 
+          success: false, 
+          message: 'Room not found. This room may have been closed or deleted because all users left.' 
+        });
         return;
       }
       
@@ -303,8 +325,29 @@ io.on('connection', (socket) => {
           username: conn.username
         }));
       
-      // Update room.users to match active connections (remove leaving user) using findOneAndUpdate to avoid version conflicts
-      if (roomId) {
+      // If this is the last user leaving, schedule deletion with grace period (for page refresh)
+      if (activeUsersInRoom.length === 0) {
+        const room = await Room.findOne({ roomId });
+        if (room) {
+          // Cancel any pending deletion for this room
+          if (pendingRoomDeletions.has(roomId)) {
+            clearTimeout(pendingRoomDeletions.get(roomId));
+            pendingRoomDeletions.delete(roomId);
+            console.log(`Cancelled pending deletion for room ${roomId} - user is leaving explicitly`);
+          }
+          
+          // Delete immediately if user explicitly left (not a disconnect)
+          await Room.deleteOne({ roomId });
+          console.log(`Room ${roomId} deleted - last user left`);
+          
+          // Notify all sockets in the room that the room was deleted
+          io.to(roomId).emit('room_deleted', {
+            roomId,
+            message: 'Room deleted - all users have left'
+          });
+        }
+      } else {
+        // Update room.users to match active connections (remove leaving user) using findOneAndUpdate to avoid version conflicts
         const room = await Room.findOne({ roomId });
         if (room) {
           await Room.findOneAndUpdate(
@@ -322,6 +365,12 @@ io.on('connection', (socket) => {
             }
           );
         }
+        
+        // Notify others in the room
+        socket.to(roomId).emit('user_left', {
+          userId: socket.userId,
+          username: socket.user.username
+        });
       }
       
       // Leave the socket room
@@ -331,12 +380,6 @@ io.on('connection', (socket) => {
       if (connection) {
         connection.roomId = null;
       }
-      
-      // Notify others in the room
-      socket.to(roomId).emit('user_left', {
-        userId: socket.userId,
-        username: socket.user.username
-      });
       
       console.log(`User ${socket.user.username} left room ${roomId}`);
     } catch (error) {
@@ -442,6 +485,11 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('video_url_change', {
       videoUrl: data.videoUrl,
       videoTitle: data.videoTitle,
+      fileName: data.fileName,
+      fileSize: data.fileSize,
+      fileType: data.fileType,
+      isBlobUrl: data.isBlobUrl,
+      uploadedBy: data.uploadedBy || socket.userId,
       initiatedBy: socket.userId
     });
     
@@ -454,6 +502,16 @@ io.on('connection', (socket) => {
         'currentVideo.lastUpdated': Date.now()
       }
     );
+  });
+
+  // Handle video file sharing (browser-only, no server storage)
+  socket.on('video_file_shared', (data) => {
+    socket.to(data.roomId).emit('video_file_shared', {
+      fileName: data.fileName,
+      fileSize: data.fileSize,
+      fileType: data.fileType,
+      uploadedBy: data.uploadedBy || socket.userId
+    });
   });
 
   // ============= WebRTC Signaling =============
@@ -719,8 +777,45 @@ io.on('connection', (socket) => {
           username: conn.username
         }));
       
-      // Update room.users to match active connections (remove disconnected user) using findOneAndUpdate to avoid version conflicts
-      if (connection.roomId) {
+      // If this is the last user leaving, schedule deletion with grace period (for page refresh)
+      if (activeUsersInRoom.length === 0) {
+        const room = await Room.findOne({ roomId: connection.roomId });
+        if (room) {
+          // Cancel any existing pending deletion
+          if (pendingRoomDeletions.has(connection.roomId)) {
+            clearTimeout(pendingRoomDeletions.get(connection.roomId));
+          }
+          
+          // Schedule deletion after 5 seconds (grace period for page refresh)
+          const deletionTimeout = setTimeout(async () => {
+            const roomStillExists = await Room.findOne({ roomId: connection.roomId });
+            if (roomStillExists) {
+              // Check if room is still empty
+              const stillActiveUsers = Array.from(activeConnections.values())
+                .filter(conn => conn.roomId === connection.roomId)
+                .length;
+              
+              if (stillActiveUsers === 0) {
+                await Room.deleteOne({ roomId: connection.roomId });
+                console.log(`Room ${connection.roomId} deleted - grace period expired, no reconnection`);
+                
+                // Notify all sockets in the room that the room was deleted
+                io.to(connection.roomId).emit('room_deleted', {
+                  roomId: connection.roomId,
+                  message: 'Room deleted - all users have left'
+                });
+              } else {
+                console.log(`Room ${connection.roomId} not deleted - user reconnected during grace period`);
+              }
+            }
+            pendingRoomDeletions.delete(connection.roomId);
+          }, 5000); // 5 second grace period
+          
+          pendingRoomDeletions.set(connection.roomId, deletionTimeout);
+          console.log(`Room ${connection.roomId} scheduled for deletion in 5 seconds (grace period for reconnection)`);
+        }
+      } else {
+        // Update room.users to match active connections (remove disconnected user) using findOneAndUpdate to avoid version conflicts
         const room = await Room.findOne({ roomId: connection.roomId });
         if (room) {
           await Room.findOneAndUpdate(
@@ -738,13 +833,13 @@ io.on('connection', (socket) => {
             }
           );
         }
+        
+        // Notify others
+        socket.to(connection.roomId).emit('user_left', {
+          userId: socket.userId,
+          username: socket.user.username
+        });
       }
-      
-      // Notify others
-      socket.to(connection.roomId).emit('user_left', {
-        userId: socket.userId,
-        username: socket.user.username
-      });
     }
     
     activeConnections.delete(socket.id);
@@ -877,30 +972,39 @@ app.get('/api/rooms/history', async (req, res) => {
   }
 });
 
-// Video upload endpoint (host only)
+// Video upload endpoint (anyone can upload)
 app.post('/api/rooms/:roomId/upload-video', upload.single('video'), async (req, res) => {
   try {
     const { roomId } = req.params;
     const { userId } = req.body;
     
+    console.log(`📤 Upload request for room ${roomId} from user ${userId}`);
+    
     if (!req.file) {
+      console.error('❌ No file in upload request');
       return res.status(400).json({ message: 'No video file provided' });
     }
     
-    // Find the room and verify user is host
+    console.log(`📁 File received: ${req.file.originalname} (${(req.file.size / (1024 * 1024)).toFixed(2)} MB)`);
+    
+    // Find the room - anyone can upload videos
     const room = await Room.findOne({ roomId });
     if (!room) {
       return res.status(404).json({ message: 'Room not found' });
     }
     
-    if (room.host !== userId) {
-      return res.status(403).json({ message: 'Only the host can upload videos' });
+    // Verify user is in the room (optional check - can be removed if not needed)
+    const userInRoom = room.users && room.users.some(u => u.userId === userId);
+    if (!userInRoom && room.host !== userId) {
+      console.warn(`User ${userId} not found in room ${roomId}, but allowing upload anyway`);
     }
     
     // Create video URL (use environment variable for production)
-    const baseUrl = process.env.BASE_URL || 'http://localhost:5000';
+    const baseUrl = process.env.BASE_URL || process.env.CLIENT_URL || 'http://localhost:5000';
     const videoUrl = `${baseUrl}/uploads/videos/${req.file.filename}`;
     const videoTitle = req.file.originalname;
+    
+    console.log(`🔗 Video URL created: ${videoUrl} (BASE_URL: ${baseUrl})`);
     
     // Get video format from filename
     const videoFormat = path.extname(req.file.originalname).toLowerCase().substring(1);
@@ -934,7 +1038,9 @@ app.post('/api/rooms/:roomId/upload-video', upload.single('video'), async (req, 
       }
     );
     
-    console.log(`Video uploaded for room ${roomId}: ${videoTitle}`);
+    console.log(`✅ Video uploaded successfully for room ${roomId}: ${videoTitle}`);
+    console.log(`   File saved to: ${req.file.path}`);
+    console.log(`   Video URL: ${videoUrl}`);
     
     // Notify all room members about the new video
     const videoData = {
@@ -962,7 +1068,21 @@ app.post('/api/rooms/:roomId/upload-video', upload.single('video'), async (req, 
     
   } catch (error) {
     console.error('Video upload error:', error);
-    res.status(500).json({ message: 'Upload failed' });
+    
+    // Clean up uploaded file if it exists but processing failed
+    if (req.file && req.file.path) {
+      try {
+        fs.unlinkSync(req.file.path);
+        console.log('Cleaned up failed upload file:', req.file.path);
+      } catch (unlinkError) {
+        console.error('Error cleaning up file:', unlinkError);
+      }
+    }
+    
+    res.status(500).json({ 
+      message: 'Upload failed: ' + (error.message || 'Unknown error'),
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
   }
 });
 
