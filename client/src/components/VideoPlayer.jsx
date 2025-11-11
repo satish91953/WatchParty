@@ -223,7 +223,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           events: {
             onReady: (event) => {
               console.log('✅ YouTube player ready');
-              setPlayerReady(true);
               setPlayerError('');
             },
             onStateChange: (event) => {
@@ -323,7 +322,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       
       hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
         console.log('✅ HLS manifest parsed, ready to play');
-        setPlayerReady(true);
         videoInitialized.current = true;
       });
       
@@ -365,7 +363,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
 
     const handleLoadedData = () => {
       console.log('✅ Video data loaded');
-      setPlayerReady(true);
       setPlayerError('');
     };
 
@@ -1208,7 +1205,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       setHostVideo(data);
       setCurrentVideoFile(null);
       setPlayerError('');
-      setPlayerReady(false);
       
       // Show notification to other users
       if (data.uploadedBy !== currentUser) {
@@ -1241,7 +1237,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       setHostVideo(data);
       setCurrentVideoFile(null);
       setPlayerError('');
-      setPlayerReady(false);
       
       if (data.selectedBy !== currentUser) {
         showNotification({
@@ -1634,7 +1629,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     
     setIsLoading(true);
     setPlayerError('');
-    setPlayerReady(false);
     
     const url = newVideoUrl.trim();
     let title = extractVideoTitle(url);
@@ -1875,7 +1869,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
 
   const loadSampleVideo = (sample) => {
     setPlayerError('');
-    setPlayerReady(false);
     resetSync();
     
     if (videoUrl.startsWith('blob:')) {
