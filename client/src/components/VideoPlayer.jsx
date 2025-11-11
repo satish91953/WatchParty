@@ -442,11 +442,18 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       }
     };
 
+    // Handle seeking event (fires while user is dragging)
+    const handleSeeking = () => {
+      // Don't emit during seeking - wait for seeked event
+      // This prevents too many events while user is dragging
+    };
+
+    // Handle seeked event (fires when seek completes)
     const handleSeeked = () => {
       const now = Date.now();
-      // Increased to 3000ms to prevent cascading events with multiple users (3-10 users)
-      // Be less strict - don't require videoInitialized, just check readyState
-      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 3000) {
+      // Reduced debounce to 1000ms for faster sync response
+      // Only skip if we just synced (to prevent loops)
+      if (ignoreNextEvent.current) {
         ignoreNextEvent.current = false;
         return;
       }
@@ -457,10 +464,14 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         return;
       }
       
-      if (socket && roomId && !isSyncing) {
+      // Always emit seek event when user seeks (forward/backward)
+      // This ensures automatic sync with all users
+      if (socket && roomId) {
         const currentTime = video.currentTime;
         const eventId = ++lastEventIdRef.current;
-        console.log(`⏭️ User control: Emitting seek to time: ${currentTime} (eventId: ${eventId})`);
+        console.log(`⏭️ User seeked: Auto-syncing to time: ${currentTime} (eventId: ${eventId})`);
+        
+        // Emit immediately for automatic sync
         socket.emit('video_seek', { 
           roomId, 
           currentTime, 
@@ -469,6 +480,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           timestamp: now
         });
         lastEventTime.current = now;
+        
+        // Set flag to prevent this event from triggering another sync
+        ignoreNextEvent.current = true;
+        setTimeout(() => {
+          ignoreNextEvent.current = false;
+        }, 500);
       }
     };
 
@@ -479,6 +496,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     video.addEventListener('error', handleError);
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
+    video.addEventListener('seeking', handleSeeking);
     video.addEventListener('seeked', handleSeeked);
 
     // Load the video
@@ -540,6 +558,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       video.removeEventListener('error', handleError);
       video.removeEventListener('play', handlePlay);
       video.removeEventListener('pause', handlePause);
+      video.removeEventListener('seeking', handleSeeking);
       video.removeEventListener('seeked', handleSeeked);
       
       // Cleanup HLS instance
@@ -1092,18 +1111,18 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                         data.socketId === socketId ||
                         data.socketId === currentUser;
       
-      if (isOwnEvent && !syncInProgress.current) {
-        console.log('🚫 Ignoring own seek event');
-        return;
-      }
-      
-      if (syncInProgress.current) {
-        console.log('🚫 Ignoring seek event - sync in progress');
+      // Allow own events if they're from sync (not from our own user action)
+      // This ensures automatic sync works properly
+      if (isOwnEvent && !syncInProgress.current && !ignoreNextEvent.current) {
+        console.log('🚫 Ignoring own seek event (user action)');
         return;
       }
       
       // Store event key to prevent duplicate processing
       lastSyncTimeRef.current = eventKey;
+      
+      // Always sync seek events, even if sync is in progress
+      // This ensures automatic sync works for all users
       
       // Handle YouTube player
       if (isYouTube && youtubePlayerRef.current) {
@@ -2038,9 +2057,25 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       const newTime = Math.max(0, Math.min(video.duration, video.currentTime + seekAmount));
       video.currentTime = newTime;
       
-      // Emit seek event
-      if (socket && roomId && !syncInProgress.current) {
-        socket.emit('video_seek', { roomId, currentTime: newTime, initiatedBy: currentUser });
+      // Automatically emit seek event for sync (forward/backward)
+      if (socket && roomId) {
+        const eventId = ++lastEventIdRef.current;
+        const now = Date.now();
+        console.log(`⏭️ Touch seek: Auto-syncing to time: ${newTime} (eventId: ${eventId})`);
+        socket.emit('video_seek', { 
+          roomId, 
+          currentTime: newTime, 
+          initiatedBy: currentUser,
+          eventId,
+          timestamp: now
+        });
+        lastEventTime.current = now;
+        
+        // Set flag to prevent duplicate events
+        ignoreNextEvent.current = true;
+        setTimeout(() => {
+          ignoreNextEvent.current = false;
+        }, 500);
       }
     }
     
