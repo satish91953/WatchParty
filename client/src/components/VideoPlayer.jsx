@@ -30,13 +30,57 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const hlsRef = useRef(null);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [showMobilePlayPrompt, setShowMobilePlayPrompt] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [videoPaused, setVideoPaused] = useState(true);
   const autoplayAttemptedRef = useRef(false);
   
-  // Detect mobile device
+  // Detect mobile device - check on mount and window resize
+  useEffect(() => {
+    const checkMobile = () => {
+      const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+                     (window.innerWidth <= 768 && 'ontouchstart' in window);
+      setIsMobile(mobile);
+      
+      // If mobile and video is paused, show prompt immediately
+      if (mobile && videoRef.current && videoRef.current.paused) {
+        setShowMobilePlayPrompt(true);
+        setVideoPaused(true);
+      }
+      
+      return mobile;
+    };
+    
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+  
+  // Detect mobile device function
   const isMobileDevice = () => {
-    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+    return isMobile || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
            (window.innerWidth <= 768 && 'ontouchstart' in window);
   };
+  
+  // Periodic check for mobile video state to ensure overlay shows
+  useEffect(() => {
+    if (!isMobile || !videoRef.current) return;
+    
+    const checkVideoState = () => {
+      if (videoRef.current) {
+        const paused = videoRef.current.paused;
+        if (paused !== videoPaused) {
+          setVideoPaused(paused);
+          if (paused) {
+            setShowMobilePlayPrompt(true);
+          }
+        }
+      }
+    };
+    
+    // Check every 500ms on mobile
+    const interval = setInterval(checkVideoState, 500);
+    return () => clearInterval(interval);
+  }, [isMobile, videoPaused]);
   
   // Refs to prevent sync loops
   const syncTimeoutRef = useRef(null);
@@ -446,7 +490,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         setTimeout(() => {
           setShowMobilePlayPrompt(true);
           setAutoplayBlocked(true);
+          setVideoPaused(true);
         }, 500); // Small delay to ensure video is fully ready
+      }
+      
+      // Update paused state
+      if (video.paused) {
+        setVideoPaused(true);
       }
     };
 
@@ -1224,6 +1274,15 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       if (data.isPlaying && isMobileDevice() && data.isInitialSync) {
         // Set a flag to show prompt after video loads
         autoplayAttemptedRef.current = true;
+        // Also set mobile state to ensure prompt shows
+        setIsMobile(true);
+      }
+      
+      // For mobile users, always show prompt when video is paused
+      if (isMobileDevice() && !data.isPlaying) {
+        setIsMobile(true);
+        setVideoPaused(true);
+        setShowMobilePlayPrompt(true);
       }
       
       // Wait for video to be ready, then sync
@@ -2212,6 +2271,25 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             onPlay={() => {
               setAutoplayBlocked(false);
               setShowMobilePlayPrompt(false);
+              setVideoPaused(false);
+            }}
+            onPause={() => {
+              setVideoPaused(true);
+              // On mobile, show prompt when video is paused
+              if (isMobileDevice()) {
+                // Small delay to avoid showing immediately after user pause
+                setTimeout(() => {
+                  if (videoRef.current && videoRef.current.paused) {
+                    setShowMobilePlayPrompt(true);
+                  }
+                }, 500);
+              }
+            }}
+            onLoadedMetadata={() => {
+              // Update paused state when video metadata loads
+              if (videoRef.current) {
+                setVideoPaused(videoRef.current.paused);
+              }
             }}
             onClick={() => {
               // User interaction detected - try to play if blocked
@@ -2226,17 +2304,38 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             Your browser does not support the video tag.
           </video>
           
-          {/* Mobile Play Prompt Overlay */}
-          {showMobilePlayPrompt && isMobileDevice() && (
+          {/* Mobile Play Prompt Overlay - Show when video is paused on mobile */}
+          {isMobile && videoPaused && videoRef.current && (
             <div
-              onClick={(e) => {
+              onTouchStart={(e) => {
                 e.stopPropagation();
+                // Prevent default to avoid triggering video controls
+                e.preventDefault();
+              }}
+              onTouchEnd={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
                 if (videoRef.current) {
                   videoRef.current.play().then(() => {
                     setShowMobilePlayPrompt(false);
                     setAutoplayBlocked(false);
                   }).catch(err => {
                     console.error('Play failed:', err);
+                    // Still show the prompt if play fails
+                    setShowMobilePlayPrompt(true);
+                  });
+                }
+              }}
+              onClick={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                if (videoRef.current) {
+                  videoRef.current.play().then(() => {
+                    setShowMobilePlayPrompt(false);
+                    setAutoplayBlocked(false);
+                  }).catch(err => {
+                    console.error('Play failed:', err);
+                    setShowMobilePlayPrompt(true);
                   });
                 }
               }}
@@ -2246,14 +2345,16 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 left: 0,
                 right: 0,
                 bottom: 0,
-                background: 'rgba(0, 0, 0, 0.85)',
+                background: 'rgba(0, 0, 0, 0.9)',
                 display: 'flex',
                 flexDirection: 'column',
                 alignItems: 'center',
                 justifyContent: 'center',
-                zIndex: 10,
+                zIndex: 1000,
                 cursor: 'pointer',
-                borderRadius: '8px'
+                borderRadius: '8px',
+                touchAction: 'manipulation',
+                WebkitTapHighlightColor: 'transparent'
               }}
             >
               <div style={{
@@ -2262,34 +2363,39 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 color: '#fff'
               }}>
                 <div style={{
-                  fontSize: '48px',
-                  marginBottom: '16px'
+                  fontSize: '64px',
+                  marginBottom: '20px',
+                  animation: 'pulse 2s infinite'
                 }}>
                   ▶️
                 </div>
                 <div style={{
-                  fontSize: '18px',
+                  fontSize: '22px',
                   fontWeight: 'bold',
-                  marginBottom: '8px'
+                  marginBottom: '12px',
+                  color: '#fff'
                 }}>
                   Tap to Play Video
                 </div>
                 <div style={{
-                  fontSize: '14px',
+                  fontSize: '16px',
                   color: '#ccc',
-                  marginTop: '8px'
+                  marginTop: '8px',
+                  textAlign: 'center',
+                  padding: '0 20px'
                 }}>
                   Mobile browsers require user interaction to play videos
                 </div>
                 <div style={{
-                  fontSize: '12px',
-                  color: '#999',
-                  marginTop: '12px',
-                  padding: '8px',
-                  background: 'rgba(255, 255, 255, 0.1)',
-                  borderRadius: '4px'
+                  fontSize: '14px',
+                  color: '#fff',
+                  marginTop: '20px',
+                  padding: '12px 20px',
+                  background: 'rgba(0, 123, 255, 0.3)',
+                  borderRadius: '8px',
+                  border: '2px solid rgba(0, 123, 255, 0.5)'
                 }}>
-                  💡 Tap anywhere on this overlay to start playback
+                  💡 Tap anywhere on this screen to start playback
                 </div>
               </div>
             </div>
