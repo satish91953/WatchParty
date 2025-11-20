@@ -1,8 +1,8 @@
 {
-  "name": "watch-party-server",
+  "name": "streamtogether-server",
   "version": "1.0.0",
   "main": "server.js",
-  "description": "Watch Party Pro - Real-time synchronized video watching server",
+  "description": "StreamTogether - Real-time synchronized video watching server",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
@@ -27,10 +27,13 @@
     "npm": ">=9.0.0"
   },
   "keywords": [
-    "watch-party",
+    "streamtogether",
     "video-sync",
     "socket.io",
-    "real-time"
+    "real-time",
+    "webrtc",
+    "voice-chat",
+    "synchronized-streaming"
   ],
   "author": "",
   "license": "ISC"

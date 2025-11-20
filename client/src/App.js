@@ -6,7 +6,51 @@ import VideoPlayer from './components/VideoPlayer';
 import RoomControls from './components/RoomControls';
 import VoiceChat from './components/VoiceChat';
 import Reactions from './components/Reactions';
+import TermsOfService from './components/TermsOfService';
+import PrivacyPolicy from './components/PrivacyPolicy';
 import { NotificationSettingsButton } from './components/NotificationSystem';
+
+// Audio Level Bars Component
+const AudioLevelBars = ({ userId }) => {
+  const [levels, setLevels] = useState([8, 10, 12, 10, 8]);
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setLevels([
+        8 + Math.random() * 8,
+        10 + Math.random() * 10,
+        12 + Math.random() * 8,
+        10 + Math.random() * 8,
+        8 + Math.random() * 8
+      ]);
+    }, 150);
+    
+    return () => clearInterval(interval);
+  }, []);
+  
+  return (
+    <div style={{
+      display: 'flex',
+      alignItems: 'center',
+      gap: '3px',
+      height: '20px',
+      marginRight: '8px'
+    }}>
+      {levels.map((height, idx) => (
+        <div
+          key={idx}
+          style={{
+            width: '3px',
+            height: `${height}px`,
+            background: 'var(--info-color)',
+            borderRadius: '2px',
+            transition: 'height 0.15s ease'
+          }}
+        />
+      ))}
+    </div>
+  );
+};
 
 const SOCKET_SERVER_URL = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
 
@@ -18,17 +62,18 @@ function App() {
   const [roomData, setRoomData] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
   const [users, setUsers] = useState([]);
-  const [status, setStatus] = useState('Welcome to Watch Party Pro! 🎬');
+  const [status, setStatus] = useState('Welcome to StreamTogether! 🎬');
   const [userId, setUserId] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [linkCopied, setLinkCopied] = useState(false);
-  const [roomTimer, setRoomTimer] = useState(null);
-  const [timerSeconds, setTimerSeconds] = useState(0);
-  const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [pendingRoomFromUrl, setPendingRoomFromUrl] = useState(null);
   const [showRoomClosedModal, setShowRoomClosedModal] = useState(false);
   const [roomClosedMessage, setRoomClosedMessage] = useState('');
   const videoPlayerRef = useRef();
+  const [peerVolumes, setPeerVolumes] = useState({});
+  const [peerMuted, setPeerMuted] = useState({});
+  const [showTerms, setShowTerms] = useState(false);
+  const [showPrivacy, setShowPrivacy] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -56,26 +101,32 @@ function App() {
       const urlParams = new URLSearchParams(window.location.search);
       const urlRoomId = urlParams.get('room');
       
-      const roomToJoin = urlRoomId || savedRoomId;
-      
-      // Auto-rejoin if we have room ID and valid username
-      if (roomToJoin && savedUsername && savedUsername.trim() !== '' && !savedUsername.startsWith('Guest-')) {
-        console.log('🔄 Auto-rejoining room:', roomToJoin, 'with username:', savedUsername);
+      // PRIORITY 1: If joining via shared link (URL), ALWAYS show name modal
+      // This ensures users always provide/confirm their name when joining via shared link
+      // Even if they have a saved username, they should confirm it for the new room
+      if (urlRoomId) {
+        console.log('📋 Room ID from URL - showing name modal:', urlRoomId);
+        setPendingRoomFromUrl(urlRoomId);
+        setStatus('Please enter your name to join the room');
+        // Clean URL immediately
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+      // PRIORITY 2: Auto-rejoin if we have saved room ID (same room) and valid username
+      // Only auto-rejoin if it's the same room (savedRoomId), not a new room from URL
+      else if (savedRoomId && savedUsername && savedUsername.trim() !== '' && !savedUsername.startsWith('Guest-')) {
+        console.log('🔄 Auto-rejoining saved room:', savedRoomId, 'with username:', savedUsername);
         setStatus('Reconnecting to room...');
         
-        newSocket.emit('join_room', roomToJoin, { username: savedUsername.trim() }, (response) => {
+        newSocket.emit('join_room', savedRoomId, { username: savedUsername.trim() }, (response) => {
           if (response.success) {
-            setRoomId(roomToJoin);
+            setRoomId(savedRoomId);
             setRoomData(response.room);
             setUsers(response.room.users?.filter(u => u.userId !== newSocket.id) || []);
-            setStatus(`🎉 Reconnected to room: ${response.room.name || roomToJoin}`);
+            setStatus(`🎉 Reconnected to room: ${response.room.name || savedRoomId}`);
             
             // Update saved room data
-            localStorage.setItem('watchParty_roomId', roomToJoin);
+            localStorage.setItem('watchParty_roomId', savedRoomId);
             localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
-            
-            // Clean URL
-            window.history.replaceState({}, '', window.location.pathname);
           } else {
             // Room might not exist anymore, clear saved data
             console.log('❌ Failed to reconnect:', response.message);
@@ -91,14 +142,6 @@ function App() {
             }
           }
         });
-      } else if (urlRoomId) {
-        // Always show name modal when joining via URL
-        // This ensures users always provide/confirm their name when joining via shared link
-        console.log('📋 Room ID from URL - showing name modal:', urlRoomId);
-        setPendingRoomFromUrl(urlRoomId);
-        setStatus('Please enter your name to join the room');
-        // Clean URL immediately
-        window.history.replaceState({}, '', window.location.pathname);
       } else if (savedRoomId && (!savedUsername || savedUsername.trim() === '' || savedUsername.startsWith('Guest-'))) {
         // Have room ID but no valid username - clear room data
         console.log('⚠️ Have room ID but no valid username, clearing saved room data');
@@ -261,6 +304,87 @@ function App() {
     });
   };
 
+  const createPrivateRoom = (roomName, username, password) => {
+    if (!socket) return;
+    
+    // Ensure username is provided and not empty
+    if (!username || username.trim() === '' || username.startsWith('Guest-')) {
+      alert('Please enter your name before creating a room');
+      return;
+    }
+    
+    if (!password || password.trim() === '') {
+      alert('Please enter a password for the private room');
+      return;
+    }
+    
+    setStatus('Creating private room...');
+    socket.emit('create_room', { 
+      roomName, 
+      username: username.trim(),
+      isPrivate: true,
+      password: password.trim()
+    }, (response) => {
+      if (response.success) {
+        setRoomId(response.roomId);
+        setRoomData(response.room);
+        setUsers(response.room.users?.filter(u => u.userId !== socket.id) || []);
+        const savedUsername = localStorage.getItem('watchParty_username') || 'You';
+        setStatus(`🔒 Private room created by ${savedUsername}! Share this code with friends: ${response.roomId}`);
+        
+        // Save room data to localStorage
+        localStorage.setItem('watchParty_roomId', response.roomId);
+        localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
+      } else {
+        setStatus('❌ Failed to create private room. Please try again.');
+      }
+    });
+  };
+
+  const joinPrivateRoom = (targetRoomId, username, password) => {
+    if (!socket || !targetRoomId.trim()) return;
+    
+    // Ensure username is provided and not empty
+    if (!username || username.trim() === '' || username.startsWith('Guest-')) {
+      alert('Please enter your name before joining the room');
+      return;
+    }
+    
+    if (!password || password.trim() === '') {
+      alert('Please enter the room password');
+      return;
+    }
+    
+    setStatus('Joining private room...');
+    socket.emit('join_room', targetRoomId.trim(), { 
+      username: username.trim(),
+      password: password.trim()
+    }, (response) => {
+      if (response.success) {
+        setRoomId(targetRoomId.trim());
+        setRoomData(response.room);
+        setUsers(response.room.users?.filter(u => u.userId !== socket.id) || []);
+        setStatus(`🔒 Successfully joined private room: ${response.room.name || targetRoomId.trim()}`);
+        
+        // Save room data to localStorage
+        localStorage.setItem('watchParty_roomId', targetRoomId.trim());
+        localStorage.setItem('watchParty_roomData', JSON.stringify(response.room));
+      } else {
+        setStatus(`❌ Failed to join private room: ${response.message}`);
+        
+        // Show popup if room is closed/deleted or password is wrong
+        if (response.message && (response.message.includes('closed') || response.message.includes('deleted'))) {
+          setRoomClosedMessage(response.message);
+          setShowRoomClosedModal(true);
+        }
+        
+        // Clear room data if join failed
+        localStorage.removeItem('watchParty_roomId');
+        localStorage.removeItem('watchParty_roomData');
+      }
+    });
+  };
+
   const leaveRoom = () => {
     if (window.confirm('Are you sure you want to leave this room?')) {
       // Notify server that we're leaving
@@ -284,7 +408,7 @@ function App() {
 
   const getConnectionStatus = () => {
     if (!isConnected) return { icon: '🔴', text: 'Disconnected', color: '#dc3545' };
-    if (roomId) return { icon: '🟢', text: 'In Room', color: '#28a745' };
+    if (roomId) return { icon: '🟢', text: 'Connected', color: '#28a745' };
     return { icon: '🟡', text: 'Connected', color: '#ffc107' };
   };
 
@@ -316,86 +440,9 @@ function App() {
     }
   };
 
-  // Room Timer Functions
-  const startTimer = (minutes) => {
-    if (!socket || !roomId) return;
-    
-    const seconds = minutes * 60;
-    setTimerSeconds(seconds);
-    setIsTimerRunning(true);
-    
-    // Emit timer start to server
-    socket.emit('room_timer_start', { roomId, seconds });
-  };
-
-  const stopTimer = () => {
-    if (!socket || !roomId) return;
-    
-    setIsTimerRunning(false);
-    setTimerSeconds(0);
-    if (roomTimer) {
-      clearInterval(roomTimer);
-      setRoomTimer(null);
-    }
-    
-    // Emit timer stop to server
-    socket.emit('room_timer_stop', { roomId });
-  };
-
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  // Timer countdown effect
-  useEffect(() => {
-    if (isTimerRunning && timerSeconds > 0) {
-      const interval = setInterval(() => {
-        setTimerSeconds(prev => {
-          if (prev <= 1) {
-            setIsTimerRunning(false);
-            clearInterval(interval);
-            // Timer finished - could trigger video play or notification
-            if (videoPlayerRef.current?.current) {
-              // Auto-play video when timer ends (if user interaction allows)
-              videoPlayerRef.current.current.play().catch(() => {
-                // Browser restrictions - user will need to click play
-              });
-            }
-            return 0;
-          }
-          return prev - 1;
-        });
-      }, 1000);
-      
-      setRoomTimer(interval);
-      return () => clearInterval(interval);
-    }
-  }, [isTimerRunning, timerSeconds]);
-
-  // Listen for timer events from server
+  // Handle room deletion when last user leaves
   useEffect(() => {
     if (!socket) return;
-
-    const handleTimerStart = (data) => {
-      setTimerSeconds(data.seconds);
-      setIsTimerRunning(true);
-    };
-
-    const handleTimerStop = () => {
-      setIsTimerRunning(false);
-      setTimerSeconds(0);
-      if (roomTimer) {
-        clearInterval(roomTimer);
-        setRoomTimer(null);
-      }
-    };
-
-    socket.on('room_timer_start', handleTimerStart);
-    socket.on('room_timer_stop', handleTimerStop);
-    
-    // Handle room deletion when last user leaves
     const handleRoomDeleted = (data) => {
       if (data.roomId === roomId) {
         setStatus('Room deleted - all users have left');
@@ -418,11 +465,9 @@ function App() {
     socket.on('room_deleted', handleRoomDeleted);
 
     return () => {
-      socket.off('room_timer_start', handleTimerStart);
-      socket.off('room_timer_stop', handleTimerStop);
       socket.off('room_deleted', handleRoomDeleted);
     };
-  }, [socket, roomTimer, roomId]);
+  }, [socket, roomId]);
 
   const connectionStatus = getConnectionStatus();
 
@@ -435,35 +480,41 @@ function App() {
         alignItems: 'center',
         marginBottom: '32px',
         padding: window.innerWidth <= 768 ? '20px 16px' : '28px 36px',
-        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%)',
+        background: isDark 
+          ? 'linear-gradient(135deg, rgba(102, 126, 234, 0.12) 0%, rgba(118, 75, 162, 0.12) 50%, rgba(240, 147, 251, 0.08) 100%)'
+          : '#dee2e6',
+        backgroundColor: isDark ? 'var(--bg-secondary)' : '#dee2e6',
         borderRadius: window.innerWidth <= 768 ? '16px' : '24px',
-        boxShadow: 
-          '0 20px 60px rgba(102, 126, 234, 0.4), 0 0 40px rgba(139, 92, 246, 0.3)',
-        color: 'white',
+        boxShadow: isDark 
+          ? '0 4px 20px rgba(102, 126, 234, 0.1)' 
+          : '0 2px 12px rgba(0, 0, 0, 0.08)',
+        color: 'var(--text-primary)',
         position: 'relative',
         overflow: 'hidden',
-        border: '1px solid rgba(255, 255, 255, 0.1)',
+        border: '1px solid var(--border-color)',
         flexWrap: window.innerWidth <= 768 ? 'wrap' : 'nowrap',
-        gap: window.innerWidth <= 768 ? '12px' : '0'
+        gap: window.innerWidth <= 768 ? '12px' : '0',
+        backdropFilter: 'blur(10px)'
       }}>
         <div style={{ position: 'relative', zIndex: 1 }}>
           <h1 style={{ 
             margin: 0, 
             fontSize: window.innerWidth <= 768 ? '24px' : '32px', 
-            fontWeight: '800',
-            textShadow: '0 2px 10px rgba(0, 0, 0, 0.2)',
-            letterSpacing: '-0.5px'
+            fontWeight: '700',
+            letterSpacing: '-0.5px',
+            color: 'var(--text-primary)',
+            opacity: 0.9
           }}>
-            🎬 Watch Party Pro
+            🎬 StreamTogether
           </h1>
           <p style={{ 
             margin: '8px 0 0 0', 
-            opacity: 0.95,
+            opacity: 0.7,
             fontSize: window.innerWidth <= 768 ? '13px' : '15px',
             fontWeight: '400',
-            textShadow: '0 1px 5px rgba(0, 0, 0, 0.2)'
+            color: 'var(--text-secondary)'
           }}>
-            Watch movies together with friends in real-time
+            Synchronized Screens, Live Voices, Shared Moments
           </p>
         </div>
         
@@ -481,10 +532,9 @@ function App() {
             style={{
               padding: window.innerWidth <= 768 ? '12px 16px' : '10px 18px',
               borderRadius: '12px',
-              border: 'none',
-              background: 'rgba(255, 255, 255, 0.2)',
-              backdropFilter: 'blur(10px)',
-              color: 'white',
+              border: '1px solid var(--border-color)',
+              background: 'var(--bg-tertiary)',
+              color: 'var(--text-primary)',
               cursor: 'pointer',
               fontSize: window.innerWidth <= 768 ? '13px' : '14px',
               fontWeight: '600',
@@ -492,33 +542,22 @@ function App() {
               alignItems: 'center',
               gap: '8px',
               transition: 'all 0.3s ease',
-              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.05)',
               minHeight: '44px',
               touchAction: 'manipulation'
             }}
             onMouseEnter={(e) => {
-              e.target.style.background = 'rgba(255, 255, 255, 0.3)';
+              e.target.style.background = 'var(--bg-secondary)';
               e.target.style.transform = 'translateY(-2px)';
             }}
             onMouseLeave={(e) => {
-              e.target.style.background = 'rgba(255, 255, 255, 0.2)';
+              e.target.style.background = 'var(--bg-tertiary)';
               e.target.style.transform = 'translateY(0)';
             }}
             title={`Switch to ${isDark ? 'light' : 'dark'} theme`}
           >
             {isDark ? '☀️' : '🌙'} {isDark ? 'Light' : 'Dark'}
           </button>
-          <div style={{
-            background: 'rgba(255, 255, 255, 0.2)',
-            backdropFilter: 'blur(10px)',
-            padding: '10px 18px',
-            borderRadius: '12px',
-            fontSize: '14px',
-            fontWeight: '600',
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)'
-          }}>
-            {connectionStatus.icon} {connectionStatus.text}
-          </div>
         </div>
         
         {/* Decorative background elements */}
@@ -528,7 +567,9 @@ function App() {
           right: '-10%',
           width: '300px',
           height: '300px',
-          background: 'radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%)',
+          background: isDark 
+            ? 'radial-gradient(circle, rgba(102, 126, 234, 0.03) 0%, transparent 70%)'
+            : 'radial-gradient(circle, rgba(102, 126, 234, 0.02) 0%, transparent 70%)',
           borderRadius: '50%'
         }}></div>
         <div style={{
@@ -537,7 +578,9 @@ function App() {
           left: '-5%',
           width: '200px',
           height: '200px',
-          background: 'radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%)',
+          background: isDark 
+            ? 'radial-gradient(circle, rgba(118, 75, 162, 0.02) 0%, transparent 70%)'
+            : 'radial-gradient(circle, rgba(118, 75, 162, 0.015) 0%, transparent 70%)',
           borderRadius: '50%'
         }}></div>
       </div>
@@ -554,13 +597,15 @@ function App() {
       {!roomId ? (
         <>
         {/* Room Selection */}
-        <RoomControls
-          onCreateRoom={createRoom}
-          onJoinRoom={joinRoom}
-          disabled={!isConnected}
-          pendingRoomFromUrl={pendingRoomFromUrl}
-          onPendingRoomHandled={() => setPendingRoomFromUrl(null)}
-        />
+          <RoomControls
+            onCreateRoom={createRoom}
+            onJoinRoom={joinRoom}
+            onCreatePrivateRoom={createPrivateRoom}
+            onJoinPrivateRoom={joinPrivateRoom}
+            disabled={!isConnected}
+            pendingRoomFromUrl={pendingRoomFromUrl}
+            onPendingRoomHandled={() => setPendingRoomFromUrl(null)}
+          />
         
         {/* Room Closed Modal */}
         {showRoomClosedModal && (
@@ -711,43 +756,48 @@ function App() {
                     <strong>Status:</strong> {status}
                   </div>
                   
-                  {/* Room Name */}
-                  {roomData?.name && (
+                  {/* Room Name and ID - Same Line */}
+                  <div style={{ 
+                    display: 'flex',
+                    gap: '12px'
+                  }}>
+                    {/* Room Name */}
+                    {roomData?.name && (
+                      <div style={{ 
+                        flex: 1,
+                        padding: '10px 12px',
+                        background: 'var(--bg-tertiary)',
+                        borderRadius: '8px',
+                        fontSize: '13px',
+                        color: 'var(--text-primary)'
+                      }}>
+                        <strong>Room:</strong> {roomData.name}
+                      </div>
+                    )}
+                    
+                    {/* Room ID */}
                     <div style={{ 
+                      flex: 1,
                       padding: '10px 12px',
                       background: 'var(--bg-tertiary)',
                       borderRadius: '8px',
                       fontSize: '13px',
-                      color: 'var(--text-primary)'
+                      color: 'var(--text-primary)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px'
                     }}>
-                      <strong>Room:</strong> {roomData.name}
+                      <strong>ID:</strong>
+                      <span style={{
+                        color: 'var(--text-primary)',
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        letterSpacing: '1px',
+                        fontFamily: 'monospace'
+                      }}>
+                        {roomId}
+                      </span>
                     </div>
-                  )}
-                  
-                  {/* Room ID */}
-                  <div style={{ 
-                    padding: '10px 12px',
-                    background: 'var(--bg-tertiary)',
-                    borderRadius: '8px',
-                    fontSize: '13px',
-                    color: 'var(--text-primary)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px'
-                  }}>
-                    <strong>ID:</strong>
-                    <span style={{
-                      background: 'var(--info-color)',
-                      color: 'white',
-                      padding: '4px 10px',
-                      borderRadius: '6px',
-                      fontSize: '12px',
-                      fontWeight: 'bold',
-                      letterSpacing: '1px',
-                      fontFamily: 'monospace'
-                    }}>
-                      {roomId}
-                    </span>
                   </div>
                   
                   {/* Actions */}
@@ -795,158 +845,212 @@ function App() {
             
             {/* Participants Card */}
             <div className="component-card" style={{ marginBottom: 0 }}>
-              <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: '700' }}>
+              <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: '700', color: 'var(--text-primary)' }}>
                 👥 Participants ({users.length + 1})
               </h3>
-              <div className="user-list" style={{ flexDirection: 'column', gap: '8px' }}>
+              <div className="user-list" style={{ flexDirection: 'column', gap: '12px' }}>
+                {/* Current User */}
                 <div style={{ 
-                  padding: '10px 12px',
-                  background: roomData?.host === userId ? 
-                    (isDark ? 'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' : 'linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(224, 168, 0, 0.15))') :
-                    (isDark ? 'linear-gradient(135deg, rgba(0, 123, 255, 0.2), rgba(0, 86, 179, 0.2))' : 'linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(37, 99, 235, 0.15))'),
-                  borderRadius: '8px',
-                  border: '1px solid',
-                  borderColor: roomData?.host === userId ? 'var(--warning-color)' : 'var(--info-color)',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: '8px',
-                  position: 'relative'
+                  gap: '12px',
+                  padding: '10px 8px',
+                  borderRadius: '8px',
+                  width: '100%'
                 }}>
-                  <span style={{
-                    width: '10px',
-                    height: '10px',
-                    background: 'var(--success-color)',
+                  {/* Avatar */}
+                  <div style={{
+                    width: '40px',
+                    height: '40px',
                     borderRadius: '50%',
-                    border: `2px solid ${isDark ? 'white' : 'var(--bg-secondary)'}`,
-                    boxShadow: `0 0 0 2px var(--bg-secondary)`
-                  }}></span>
-                  <span style={{ flex: 1, fontWeight: '600', fontSize: '14px', color: 'var(--text-primary)' }}>
-                    You {roomData?.host === userId && '👑'}
-                  </span>
-                  {roomData?.host === userId && (
-                    <span style={{ fontSize: '12px', color: 'var(--warning-color)' }}>HOST</span>
-                  )}
-                </div>
-                {users.map(user => (
-                  <div key={user.userId} style={{ 
-                    padding: '10px 12px',
-                    background: user.isHost ? 
-                      (isDark ? 'linear-gradient(135deg, rgba(255, 193, 7, 0.2), rgba(224, 168, 0, 0.2))' : 'linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(224, 168, 0, 0.15))') :
-                      (isDark ? 'linear-gradient(135deg, rgba(40, 167, 69, 0.2), rgba(32, 201, 151, 0.2))' : 'linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(5, 150, 105, 0.15))'),
-                    borderRadius: '8px',
-                    border: '1px solid',
-                    borderColor: user.isHost ? 'var(--warning-color)' : 'var(--success-color)',
+                    background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '8px'
+                    justifyContent: 'center',
+                    color: 'white',
+                    fontWeight: '600',
+                    fontSize: '16px',
+                    flexShrink: 0
                   }}>
-                    <span style={{
-                      width: '10px',
-                      height: '10px',
-                      background: 'var(--success-color)',
-                      borderRadius: '50%',
-                      border: `2px solid ${isDark ? 'white' : 'var(--bg-secondary)'}`,
-                      boxShadow: `0 0 0 2px var(--bg-secondary)`
-                    }}></span>
-                    <span style={{ flex: 1, fontWeight: '600', fontSize: '14px', color: 'var(--text-primary)' }}>
-                      {user.username} {user.isHost && '👑'}
-                    </span>
-                    {user.isHost && (
-                      <span style={{ fontSize: '12px', color: 'var(--warning-color)' }}>HOST</span>
-                    )}
+                    {(() => {
+                      const savedUsername = localStorage.getItem('watchParty_username') || 'You';
+                      return savedUsername.charAt(0).toUpperCase();
+                    })()}
                   </div>
-                ))}
+                  
+                  {/* Name */}
+                  <span style={{ 
+                    minWidth: '80px',
+                    fontWeight: '500', 
+                    fontSize: '14px', 
+                    color: 'var(--text-primary)',
+                    flexShrink: 0
+                  }}>
+                    You
+                  </span>
+                  
+                  {/* Volume Bar - Simple horizontal bar for self */}
+                  <div style={{
+                    flex: 1,
+                    maxWidth: '250px',
+                    marginLeft: 'auto',
+                    display: 'flex',
+                    alignItems: 'center'
+                  }}>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100"
+                      value={100}
+                      disabled
+                      className="participant-volume-slider"
+                      style={{
+                        width: '100%'
+                      }}
+                    />
+                  </div>
+                </div>
+                
+                {/* Other Users */}
+                {users.map((user, index) => {
+                  // Generate consistent color based on username
+                  const colors = [
+                    'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                    'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                    'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+                    'linear-gradient(135deg, #ec4899 0%, #db2777 100%)',
+                    'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)'
+                  ];
+                  const colorIndex = index % colors.length;
+                  
+                  return (
+                    <div 
+                      key={user.userId} 
+                      style={{ 
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '12px',
+                        padding: '10px 8px',
+                        borderRadius: '8px',
+                        border: peerMuted[user.socketId || user.userId] ? '1px solid var(--accent-color)' : '1px solid transparent',
+                        transition: 'border 0.2s ease',
+                        width: '100%'
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!peerMuted[user.socketId || user.userId]) {
+                          e.currentTarget.style.border = '1px solid var(--accent-color)';
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (!peerMuted[user.socketId || user.userId]) {
+                          e.currentTarget.style.border = '1px solid transparent';
+                        }
+                      }}
+                    >
+                      {/* Avatar */}
+                      <div style={{
+                        width: '40px',
+                        height: '40px',
+                        borderRadius: '50%',
+                        background: colors[colorIndex],
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'white',
+                        fontWeight: '600',
+                        fontSize: '16px',
+                        flexShrink: 0
+                      }}>
+                        {user.username.charAt(0).toUpperCase()}
+                      </div>
+                      
+                      {/* Name */}
+                      <span style={{ 
+                        minWidth: '80px',
+                        fontWeight: '500', 
+                        fontSize: '14px', 
+                        color: 'var(--text-primary)',
+                        flexShrink: 0
+                      }}>
+                        {user.username}
+                      </span>
+                      
+                      {/* Volume Control - Slider for others */}
+                      <div style={{
+                        flex: 1,
+                        maxWidth: '250px',
+                        marginLeft: 'auto',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px'
+                      }}>
+                        <input
+                          type="range"
+                          min="0"
+                          max="100"
+                          value={peerMuted[user.socketId || user.userId] ? 0 : (peerVolumes[user.socketId || user.userId] || 100)}
+                          onChange={(e) => {
+                            const volume = parseInt(e.target.value);
+                            const peerId = user.socketId || user.userId;
+                            setPeerVolumes(prev => ({ ...prev, [peerId]: volume }));
+                            setPeerMuted(prev => ({ ...prev, [peerId]: volume === 0 }));
+                            // Update audio element volume
+                            const audio = document.querySelector(`audio[data-peer-id="${peerId}"]`);
+                            if (audio) {
+                              audio.volume = volume / 100;
+                            }
+                          }}
+                          className="participant-volume-slider"
+                          style={{
+                            width: '100%'
+                          }}
+                        />
+                        <button
+                          onClick={() => {
+                            const peerId = user.socketId || user.userId;
+                            const isMuted = peerMuted[peerId] || false;
+                            const currentVolume = peerVolumes[peerId] || 100;
+                            setPeerMuted(prev => ({ ...prev, [peerId]: !isMuted }));
+                            // Mute/unmute audio element
+                            const audio = document.querySelector(`audio[data-peer-id="${peerId}"]`);
+                            if (audio) {
+                              if (!isMuted) {
+                                // Mute
+                                audio.volume = 0;
+                              } else {
+                                // Unmute - restore volume
+                                audio.volume = currentVolume / 100;
+                              }
+                            }
+                          }}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            padding: '4px 8px',
+                            cursor: 'pointer',
+                            fontSize: '14px',
+                            color: peerMuted[user.socketId || user.userId] ? 'var(--error-color)' : 'var(--text-secondary)',
+                            opacity: 0.7,
+                            transition: 'opacity 0.2s ease',
+                            flexShrink: 0
+                          }}
+                          onMouseEnter={(e) => {
+                            e.target.style.opacity = '1';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.target.style.opacity = '0.7';
+                          }}
+                          title={peerMuted[user.socketId || user.userId] ? 'Unmute' : 'Mute'}
+                        >
+                          {peerMuted[user.socketId || user.userId] ? '🔇' : '🔊'}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
-            {/* Room Timer Card */}
-            {roomId && (
-              <div className="component-card" style={{ 
-                marginBottom: 0,
-                background: isTimerRunning ? 'linear-gradient(135deg, rgba(40, 167, 69, 0.15), rgba(32, 201, 151, 0.15))' : 'var(--bg-secondary)',
-                border: isTimerRunning ? '2px solid #28a745' : '1px solid var(--border-color)'
-              }}>
-                <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', fontWeight: '700' }}>⏰ Timer</h3>
-                {isTimerRunning ? (
-                  <div style={{ 
-                    fontSize: '36px', 
-                    fontWeight: 'bold', 
-                    color: '#28a745', 
-                    fontFamily: 'monospace',
-                    textAlign: 'center',
-                    marginBottom: '16px',
-                    padding: '12px',
-                    background: 'var(--bg-tertiary)',
-                    borderRadius: '8px'
-                  }}>
-                    {formatTime(timerSeconds)}
-                  </div>
-                ) : (
-                  <div style={{ 
-                    fontSize: '14px', 
-                    color: 'var(--text-muted)',
-                    textAlign: 'center',
-                    marginBottom: '16px',
-                    padding: '12px',
-                    background: 'var(--bg-tertiary)',
-                    borderRadius: '8px'
-                  }}>
-                    No timer active
-                  </div>
-                )}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {!isTimerRunning ? (
-                    <>
-                      <button
-                        onClick={() => startTimer(1)}
-                        className="btn-success"
-                        style={{ width: '100%', padding: '10px', fontSize: '13px' }}
-                      >
-                        Start 1 min
-                      </button>
-                      <button
-                        onClick={() => startTimer(5)}
-                        className="btn-success"
-                        style={{ width: '100%', padding: '10px', fontSize: '13px' }}
-                      >
-                        Start 5 min
-                      </button>
-                      <button
-                        onClick={() => startTimer(10)}
-                        className="btn-success"
-                        style={{ width: '100%', padding: '10px', fontSize: '13px' }}
-                      >
-                        Start 10 min
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      onClick={stopTimer}
-                      className="btn-danger"
-                      style={{ width: '100%', padding: '10px', fontSize: '13px' }}
-                    >
-                      Stop Timer
-                    </button>
-                  )}
-                </div>
-                {isTimerRunning && timerSeconds <= 10 && (
-                  <div style={{ 
-                    marginTop: '12px', 
-                    padding: '10px', 
-                    background: '#dc3545', 
-                    borderRadius: '8px',
-                    color: '#fff',
-                    textAlign: 'center',
-                    fontWeight: 'bold',
-                    fontSize: '13px',
-                    animation: 'pulse 1s infinite'
-                  }}>
-                    ⚠️ Timer ending soon!
-                  </div>
-                )}
-              </div>
-            )}
-            
             {/* Notification Settings Button */}
             <NotificationSettingsButton />
           </div>
@@ -958,16 +1062,6 @@ function App() {
           />
         </div>
       )}
-
-      {/* Video Support Disclaimer */}
-      <div className="warning-message" style={{ 
-        background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        marginTop: '40px',
-        marginBottom: '20px'
-      }}>
-        <strong>📺 Video Support:</strong> You can now watch YouTube videos together! 
-        Simply paste any YouTube URL in the video player. Direct MP4 videos are also supported.
-      </div>
 
       {/* Footer */}
       <div style={{
@@ -985,14 +1079,7 @@ function App() {
           fontWeight: '600',
           color: 'var(--text-primary)'
         }}>
-          🎬 Watch Party Pro
-        </p>
-        <p style={{ 
-          fontSize: '13px', 
-          margin: '8px 0',
-          color: 'var(--text-secondary)'
-        }}>
-          Built with React, Socket.IO, and WebRTC
+          🎬 StreamTogether
         </p>
         <div style={{
           display: 'flex',
@@ -1029,15 +1116,65 @@ function App() {
             Reactions
           </span>
         </div>
-        <p style={{ 
-          fontSize: '12px', 
-          marginTop: '16px', 
-          color: 'var(--text-muted)',
-          fontStyle: 'italic'
+        <div style={{
+          display: 'flex',
+          justifyContent: 'center',
+          gap: '20px',
+          marginTop: '20px',
+          flexWrap: 'wrap',
+          alignItems: 'center'
         }}>
-          💡 Tip: Use direct MP4 video URLs for best compatibility. YouTube links won't work.
+          <button
+            onClick={() => setShowTerms(true)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-secondary)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              padding: '4px 8px',
+              transition: 'color 0.2s ease'
+            }}
+            onMouseEnter={(e) => e.target.style.color = 'var(--accent-color)'}
+            onMouseLeave={(e) => e.target.style.color = 'var(--text-secondary)'}
+          >
+            Terms of Service
+          </button>
+          <span style={{ color: 'var(--text-muted)' }}>•</span>
+          <button
+            onClick={() => setShowPrivacy(true)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-secondary)',
+              fontSize: '12px',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              padding: '4px 8px',
+              transition: 'color 0.2s ease'
+            }}
+            onMouseEnter={(e) => e.target.style.color = 'var(--accent-color)'}
+            onMouseLeave={(e) => e.target.style.color = 'var(--text-secondary)'}
+          >
+            Privacy Policy
+          </button>
+        </div>
+        <p style={{ 
+          fontSize: '11px', 
+          marginTop: '20px', 
+          color: 'var(--text-muted)',
+          opacity: 0.7
+        }}>
+          ⚠️ Disclaimer: YouTube videos are embedded via YouTube's official API. StreamTogether is not affiliated with YouTube. Content availability is subject to YouTube's Terms of Service.
         </p>
       </div>
+
+      {/* Terms of Service Modal */}
+      {showTerms && <TermsOfService onClose={() => setShowTerms(false)} />}
+
+      {/* Privacy Policy Modal */}
+      {showPrivacy && <PrivacyPolicy onClose={() => setShowPrivacy(false)} />}
     </div>
   );
 }

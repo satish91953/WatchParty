@@ -94,13 +94,46 @@ const roomSchema = new mongoose.Schema({
   },
   isActive: {
     type: Boolean,
-    default: true
+    default: true,
+    index: true
+  },
+  isPrivate: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
+  password: {
+    type: String,
+    default: null
   }
 });
 
-// Auto-update updatedAt
+// Add indexes for performance
+roomSchema.index({ host: 1 });
+roomSchema.index({ createdAt: -1 });
+roomSchema.index({ updatedAt: -1 });
+roomSchema.index({ 'currentVideo.lastUpdated': -1 });
+roomSchema.index({ 'users.userId': 1 });
+
+// Limit array sizes to prevent unbounded growth
 roomSchema.pre('save', function(next) {
   this.updatedAt = Date.now();
+  
+  // Limit messages array to last 1000 messages
+  if (this.messages && this.messages.length > 1000) {
+    this.messages = this.messages.slice(-1000);
+  }
+  
+  // Limit reactions array to last 500 reactions
+  if (this.reactions && this.reactions.length > 500) {
+    this.reactions = this.reactions.slice(-500);
+  }
+  
+  // Limit video library to 100 videos
+  if (this.videoLibrary && this.videoLibrary.length > 100) {
+    this.videoLibrary = this.videoLibrary.slice(-100);
+  }
+  
   next();
 });
 

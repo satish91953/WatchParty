@@ -705,7 +705,6 @@ function NotificationSettingsContent() {
 
 // Notification Settings Component (kept for backward compatibility, but can be removed)
 export function NotificationSettings() {
-  const { settings, updateSettings } = useNotifications();
   const [isExpanded, setIsExpanded] = useState(false);
 
   return (

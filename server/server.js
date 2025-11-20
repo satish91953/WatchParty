@@ -23,7 +23,9 @@ app.use(cors({
   methods: ["GET", "POST"],
   credentials: true
 }));
-app.use(express.json());
+// Body parser with size limits
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Ensure uploads directory exists
 const uploadsDir = 'uploads/videos';
@@ -62,14 +64,38 @@ const upload = multer({
 // Serve uploaded videos
 app.use('/uploads', express.static('uploads'));
 
-// Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/watchparty', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => {
+// Connect to MongoDB with connection pooling for scalability
+const mongoOptions = {
+  maxPoolSize: 50, // Maximum number of connections in the pool
+  minPoolSize: 5, // Minimum number of connections
+  serverSelectionTimeoutMS: 5000, // How long to try selecting a server
+  socketTimeoutMS: 45000, // How long to wait for a socket
+  retryWrites: true,
+  retryReads: true
+};
+
+// Mongoose-specific options (set separately)
+mongoose.set('bufferCommands', false);
+
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/watchparty', mongoOptions).then(() => {
   console.log('Connected to MongoDB');
+  console.log(`MongoDB connection pool: min=${mongoOptions.minPoolSize}, max=${mongoOptions.maxPoolSize}`);
 }).catch(err => {
   console.error('MongoDB connection error:', err);
+  process.exit(1); // Exit on connection failure
+});
+
+// Handle MongoDB connection events
+mongoose.connection.on('disconnected', () => {
+  console.warn('MongoDB disconnected. Attempting to reconnect...');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB error:', err);
+});
+
+mongoose.connection.on('reconnected', () => {
+  console.log('MongoDB reconnected');
 });
 
 const io = socketIo(server, {
@@ -77,22 +103,127 @@ const io = socketIo(server, {
     origin: CLIENT_URL,
     methods: ["GET", "POST"],
     credentials: true
+  },
+  // Performance optimizations for scalability
+  pingTimeout: 60000, // 60 seconds
+  pingInterval: 25000, // 25 seconds
+  maxHttpBufferSize: 1e6, // 1MB max message size
+  transports: ['websocket', 'polling'], // Prefer websocket
+  allowEIO3: true, // Allow Engine.IO v3 clients
+  // Connection limits
+  connectTimeout: 45000,
+  // Compression
+  perMessageDeflate: {
+    zlibDeflateOptions: {
+      chunkSize: 1024,
+      memLevel: 7,
+      level: 3
+    },
+    zlibInflateOptions: {
+      chunkSize: 10 * 1024
+    },
+    threshold: 1024 // Only compress messages larger than 1KB
   }
 });
 
-// Store active socket connections
+// Rate limiting: Track requests per socket
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW = 60000; // 1 minute
+const MAX_REQUESTS_PER_WINDOW = 100; // Max 100 requests per minute per socket
+
+function checkRateLimit(socketId) {
+  const now = Date.now();
+  const record = rateLimitMap.get(socketId);
+  
+  if (!record) {
+    rateLimitMap.set(socketId, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
+    return true;
+  }
+  
+  if (now > record.resetTime) {
+    record.count = 1;
+    record.resetTime = now + RATE_LIMIT_WINDOW;
+    return true;
+  }
+  
+  if (record.count >= MAX_REQUESTS_PER_WINDOW) {
+    return false;
+  }
+  
+  record.count++;
+  return true;
+}
+
+// Clean up rate limit map periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [socketId, record] of rateLimitMap.entries()) {
+    if (now > record.resetTime) {
+      rateLimitMap.delete(socketId);
+    }
+  }
+}, RATE_LIMIT_WINDOW);
+
+// Store active socket connections with automatic cleanup
 const activeConnections = new Map();
+const MAX_CONNECTIONS = 5000; // Maximum concurrent connections
 
 // Store pending room deletions (for grace period on page refresh)
 const pendingRoomDeletions = new Map();
 
-// Authentication middleware for socket
+// Connection tracking for monitoring
+let totalConnections = 0;
+let activeConnectionsCount = 0;
+
+// Cleanup function for connection tracking
+function cleanupConnection(socketId) {
+  if (activeConnections.has(socketId)) {
+    activeConnections.delete(socketId);
+    activeConnectionsCount = activeConnections.size;
+    rateLimitMap.delete(socketId);
+  }
+}
+
+// Periodic cleanup of stale connections (every 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  let cleaned = 0;
+  
+  // Clean up rate limit map
+  for (const [socketId, record] of rateLimitMap.entries()) {
+    if (now > record.resetTime + RATE_LIMIT_WINDOW) {
+      rateLimitMap.delete(socketId);
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) {
+    console.log(`Cleaned up ${cleaned} stale rate limit records`);
+  }
+}, 5 * 60 * 1000);
+
+// Authentication middleware for socket with rate limiting
 io.use(async (socket, next) => {
+  // Check connection limit
+  if (activeConnections.size >= MAX_CONNECTIONS) {
+    console.warn(`Connection limit reached: ${MAX_CONNECTIONS}`);
+    return next(new Error('Server at capacity. Please try again later.'));
+  }
+  
+  // Check rate limit
+  if (!checkRateLimit(socket.id)) {
+    console.warn(`Rate limit exceeded for socket: ${socket.id}`);
+    return next(new Error('Too many requests. Please slow down.'));
+  }
+  
   try {
     const token = socket.handshake.auth.token;
     if (token) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
       const user = await User.findById(decoded.userId).select('-password');
+      if (!user) {
+        throw new Error('User not found');
+      }
       socket.userId = user._id.toString();
       socket.user = user;
     } else {
@@ -109,13 +240,21 @@ io.use(async (socket, next) => {
 });
 
 io.on('connection', (socket) => {
-  console.log('User connected:', socket.userId, socket.user.username);
+  totalConnections++;
+  activeConnectionsCount = activeConnections.size + 1;
   
-  activeConnections.set(socket.id, {
+  console.log(`User connected: ${socket.userId} (${socket.user.username}) [Total: ${totalConnections}, Active: ${activeConnectionsCount}]`);
+  
+  // Track connection metadata
+  const connectionData = {
     userId: socket.userId,
     username: socket.user.username,
-    roomId: null
-  });
+    roomId: null,
+    connectedAt: Date.now(),
+    lastActivity: Date.now()
+  };
+  
+  activeConnections.set(socket.id, connectionData);
 
   // ============= Room Management =============
   
@@ -147,6 +286,8 @@ io.on('connection', (socket) => {
         roomId,
         name: data.roomName || 'Untitled Room',
         host: socket.userId,
+        isPrivate: data.isPrivate || false,
+        password: data.isPrivate && data.password ? data.password.trim() : null,
         users: [{
           userId: socket.userId,
           username: username,
@@ -233,6 +374,18 @@ io.on('connection', (socket) => {
           message: 'Room not found. This room may have been closed or deleted because all users left.' 
         });
         return;
+      }
+      
+      // Check if room is private and verify password
+      if (room.isPrivate) {
+        const providedPassword = data?.password || '';
+        if (!providedPassword || providedPassword.trim() !== room.password) {
+          if (actualCallback) actualCallback({ 
+            success: false, 
+            message: 'Incorrect password. This is a private room.' 
+          });
+          return;
+        }
       }
       
       // Update active connection with the username
@@ -623,6 +776,15 @@ io.on('connection', (socket) => {
     if (global.voiceChatUsers.has(roomId)) {
       global.voiceChatUsers.get(roomId).delete(socket.id);
       
+      // Notify other users in voice chat that this user left
+      const voiceChatUsers = Array.from(global.voiceChatUsers.get(roomId));
+      voiceChatUsers.forEach(userId => {
+        io.to(userId).emit('user_left_voice', {
+          userId: socket.id,
+          roomId
+        });
+      });
+      
       // If no users left in voice chat, remove the room entry
       if (global.voiceChatUsers.get(roomId).size === 0) {
         global.voiceChatUsers.delete(roomId);
@@ -663,37 +825,6 @@ io.on('connection', (socket) => {
         roomId
       });
     }
-  });
-
-  // ============= Screen Sharing =============
-  
-  socket.on('start_screen_share', (data) => {
-    console.log(`${socket.user.username} started screen sharing in room ${data.roomId}`);
-    socket.to(data.roomId).emit('user_started_screen_share', {
-      userId: socket.userId,
-      username: socket.user.username
-    });
-  });
-
-  socket.on('stop_screen_share', (data) => {
-    console.log(`${socket.user.username} stopped screen sharing in room ${data.roomId}`);
-    socket.to(data.roomId).emit('user_stopped_screen_share', {
-      userId: socket.userId
-    });
-  });
-
-  socket.on('screen_share_signal', (payload) => {
-    io.to(payload.userToSignal).emit('screen_share_offer', {
-      signal: payload.signal,
-      callerID: payload.callerID
-    });
-  });
-
-  socket.on('screen_share_return_signal', (payload) => {
-    io.to(payload.callerID).emit('screen_share_answer', {
-      signal: payload.signal,
-      id: socket.id
-    });
   });
 
   // ============= Reactions =============
@@ -822,7 +953,8 @@ io.on('connection', (socket) => {
   // ============= Disconnect =============
   
   socket.on('disconnect', async () => {
-    console.log('User disconnected:', socket.userId);
+    activeConnectionsCount = activeConnections.size - 1;
+    console.log(`User disconnected: ${socket.userId} [Active: ${activeConnectionsCount}]`);
     
     const connection = activeConnections.get(socket.id);
     if (connection && connection.roomId) {
@@ -853,27 +985,32 @@ io.on('connection', (socket) => {
           
           // Schedule deletion after 5 seconds (grace period for page refresh)
           const deletionTimeout = setTimeout(async () => {
-            const roomStillExists = await Room.findOne({ roomId: connection.roomId });
-            if (roomStillExists) {
-              // Check if room is still empty
-              const stillActiveUsers = Array.from(activeConnections.values())
-                .filter(conn => conn.roomId === connection.roomId)
-                .length;
-              
-              if (stillActiveUsers === 0) {
-                await Room.deleteOne({ roomId: connection.roomId });
-                console.log(`Room ${connection.roomId} deleted - grace period expired, no reconnection`);
+            try {
+              const roomStillExists = await Room.findOne({ roomId: connection.roomId });
+              if (roomStillExists) {
+                // Check if room is still empty
+                const stillActiveUsers = Array.from(activeConnections.values())
+                  .filter(conn => conn.roomId === connection.roomId)
+                  .length;
                 
-                // Notify all sockets in the room that the room was deleted
-                io.to(connection.roomId).emit('room_deleted', {
-                  roomId: connection.roomId,
-                  message: 'Room deleted - all users have left'
-                });
-              } else {
-                console.log(`Room ${connection.roomId} not deleted - user reconnected during grace period`);
+                if (stillActiveUsers === 0) {
+                  await Room.deleteOne({ roomId: connection.roomId });
+                  console.log(`Room ${connection.roomId} deleted - grace period expired, no reconnection`);
+                  
+                  // Notify all sockets in the room that the room was deleted
+                  io.to(connection.roomId).emit('room_deleted', {
+                    roomId: connection.roomId,
+                    message: 'Room deleted - all users have left'
+                  });
+                } else {
+                  console.log(`Room ${connection.roomId} not deleted - user reconnected during grace period`);
+                }
               }
+            } catch (error) {
+              console.error(`Error deleting room ${connection.roomId}:`, error);
+            } finally {
+              pendingRoomDeletions.delete(connection.roomId);
             }
-            pendingRoomDeletions.delete(connection.roomId);
           }, 5000); // 5 second grace period
           
           pendingRoomDeletions.set(connection.roomId, deletionTimeout);
@@ -881,33 +1018,38 @@ io.on('connection', (socket) => {
         }
       } else {
         // Update room.users to match active connections (remove disconnected user) using findOneAndUpdate to avoid version conflicts
-        const room = await Room.findOne({ roomId: connection.roomId });
-        if (room) {
-          await Room.findOneAndUpdate(
-            { roomId: connection.roomId },
-            {
-              $set: {
-                users: activeUsersInRoom.map(user => ({
-                  userId: user.userId,
-                  username: user.username,
-                  isHost: user.userId === room.host,
-                  hasVideo: false,
-                  hasAudio: false
-                }))
+        try {
+          const room = await Room.findOne({ roomId: connection.roomId });
+          if (room) {
+            await Room.findOneAndUpdate(
+              { roomId: connection.roomId },
+              {
+                $set: {
+                  users: activeUsersInRoom.map(user => ({
+                    userId: user.userId,
+                    username: user.username,
+                    isHost: user.userId === room.host,
+                    hasVideo: false,
+                    hasAudio: false
+                  }))
+                }
               }
-            }
-          );
+            );
+          }
+          
+          // Notify others
+          socket.to(connection.roomId).emit('user_left', {
+            userId: socket.userId,
+            username: socket.user.username
+          });
+        } catch (error) {
+          console.error(`Error updating room ${connection.roomId} on disconnect:`, error);
         }
-        
-        // Notify others
-        socket.to(connection.roomId).emit('user_left', {
-          userId: socket.userId,
-          username: socket.user.username
-        });
       }
     }
     
-    activeConnections.delete(socket.id);
+    // Clean up connection tracking
+    cleanupConnection(socket.id);
   });
 });
 
@@ -928,8 +1070,73 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+  try {
+    const memUsage = process.memoryUsage();
+    const mongoState = mongoose.connection.readyState;
+    const mongoStates = {
+      0: 'disconnected',
+      1: 'connected',
+      2: 'connecting',
+      3: 'disconnecting'
+    };
+    
+    res.json({ 
+      status: 'OK', 
+      timestamp: new Date().toISOString(),
+      uptime: Math.round(process.uptime()),
+      uptimeFormatted: formatUptime(process.uptime()),
+      memory: {
+        heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024),
+        heapTotal: Math.round(memUsage.heapTotal / 1024 / 1024),
+        rss: Math.round(memUsage.rss / 1024 / 1024),
+        external: Math.round(memUsage.external / 1024 / 1024),
+        unit: 'MB'
+      },
+      connections: {
+        total: totalConnections || 0,
+        active: activeConnectionsCount || activeConnections.size || 0,
+        max: MAX_CONNECTIONS,
+        percentage: Math.round(((activeConnectionsCount || activeConnections.size || 0) / MAX_CONNECTIONS) * 100)
+      },
+      mongodb: {
+        status: mongoStates[mongoState] || 'unknown',
+        readyState: mongoState,
+        host: mongoose.connection.host || 'N/A',
+        name: mongoose.connection.name || 'N/A'
+      },
+      server: {
+        nodeVersion: process.version,
+        platform: process.platform,
+        arch: process.arch
+      }
+    });
+  } catch (error) {
+    console.error('Health check error:', error);
+    res.status(500).json({ 
+      status: 'ERROR', 
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
+
+// Helper function to format uptime
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (days > 0) {
+    return `${days}d ${hours}h ${minutes}m ${secs}s`;
+  } else if (hours > 0) {
+    return `${hours}h ${minutes}m ${secs}s`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  } else {
+    return `${secs}s`;
+  }
+}
 
 // User registration
 app.post('/api/auth/register', async (req, res) => {

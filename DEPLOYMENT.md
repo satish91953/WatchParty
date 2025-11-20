@@ -60,10 +60,10 @@ MONGODB_URI=mongodb://localhost:27017/watchparty
 # MONGODB_URI=mongodb+srv://username:password@cluster.mongodb.net/watchparty
 
 # JWT Secret (generate a random string)
-JWT_SECRET=your-super-secret-jwt-key-change-this
+JWT_SECRET=b7a01e6d9931ddea9bd4fbc876a34953fb9e7a66131bf9ab078a3c7c34df59cd
 
 # Base URL for video file serving
-BASE_URL=https://yourdomain.com
+BASE_URL=https://watch.cloudpillers.com
 ```
 
 **Generate JWT Secret:**

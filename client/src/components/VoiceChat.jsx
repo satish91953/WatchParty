@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 
 // Dynamic import to handle potential issues with simple-peer
 let Peer = null;
@@ -17,16 +17,14 @@ const loadPeer = async () => {
   return Peer;
 };
 
-function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
+function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerVolumesChange, onPeerMuteChange }) {
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
   const [volume, setVolume] = useState(100);
   const [audioStream, setAudioStream] = useState(null);
-  const [peers, setPeers] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [peerLoaded, setPeerLoaded] = useState(false);
   const [peerVolumes, setPeerVolumes] = useState({}); // Track volume per peer
-  const [isMinimized, setIsMinimized] = useState(false);
   
   const peersRef = useRef([]);
   const volumeRef = useRef(100);
@@ -52,6 +50,11 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       alert('Voice chat is not available. Please refresh the page and try again.');
       return;
     }
+    
+    if (!socket || !socket.connected) {
+      alert('Not connected to server. Please wait for connection and try again.');
+      return;
+    }
 
     if (!audioEnabled) {
       try {
@@ -70,7 +73,17 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
         setConnectionStatus('connected');
         
         // Notify server that we're joining voice chat
-        socket.emit('join_voice_chat', { roomId });
+        console.log('📞 Joining voice chat', { roomId, socketId: socket.id });
+        if (socket && socket.connected) {
+          socket.emit('join_voice_chat', { roomId });
+        } else {
+          console.error('❌ Cannot join voice chat - socket not connected');
+          setConnectionStatus('error');
+          stream.getTracks().forEach(track => track.stop());
+          setAudioStream(null);
+          setAudioEnabled(false);
+          return;
+        }
         
         // Note: We don't create peers here for existing users
         // The server will notify existing voice chat users via 'new_user_joined_voice'
@@ -107,26 +120,30 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
     } else {
       // Stop voice chat - cleanup in proper order
       try {
+        // Notify server first that we're leaving voice chat
+        if (socket && socket.connected) {
+          socket.emit('leave_voice_chat', { roomId });
+        }
+        
         // First, remove all event listeners from peers
-      peersRef.current.forEach(peerObj => {
-        try {
+        peersRef.current.forEach(peerObj => {
+          try {
             if (peerObj.peer) {
               // Remove all event listeners
               peerObj.peer.removeAllListeners();
               // Destroy peer connection
               if (typeof peerObj.peer.destroy === 'function') {
-          peerObj.peer.destroy();
+                peerObj.peer.destroy();
               }
             }
-        } catch (e) {
+          } catch (e) {
             console.warn('Error cleaning up peer:', e);
-        }
-      });
+          }
+        });
         
         // Clear peer references
-      peersRef.current = [];
-      setPeers([]);
-      
+        peersRef.current = [];
+        
         // Clear all retry timers
         Object.values(peerRetryTimers.current).forEach(timer => clearTimeout(timer));
         peerRetryTimers.current = {};
@@ -162,9 +179,6 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
           }
         });
         
-        // Notify server that we're leaving voice chat
-        socket.emit('leave_voice_chat', { roomId });
-        
         // Reset state
         setAudioStream(null);
         setAudioEnabled(false);
@@ -172,17 +186,16 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       } catch (error) {
         console.error('Error stopping voice chat:', error);
         // Force reset state even if cleanup fails
-      setAudioStream(null);
-      setAudioEnabled(false);
-      setConnectionStatus('disconnected');
+        setAudioStream(null);
+        setAudioEnabled(false);
+        setConnectionStatus('disconnected');
         peersRef.current = [];
-        setPeers([]);
       }
     }
   };
 
   // Create a new peer connection (caller)
-  const createPeer = (userToSignal, callerID, stream) => {
+  const createPeer = useCallback((userToSignal, callerID, stream) => {
     if (!Peer) return null;
 
     try {
@@ -235,10 +248,7 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
               } else {
                 peersRef.current.push(peerObj);
               }
-              setPeers(prev => {
-                const newPeers = prev.filter(p => p.peerID !== userToSignal);
-                return [...newPeers, peerObj];
-              });
+              // Peer state managed via peersRef
             }
           }, 3000);
         }
@@ -280,10 +290,7 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
                 } else {
                   peersRef.current.push(peerObj);
                 }
-                setPeers(prev => {
-                  const newPeers = prev.filter(p => p.peerID !== userToSignal);
-                  return [...newPeers, peerObj];
-                });
+                // Peer state managed via peersRef
               }
             }, 2000);
           }
@@ -369,10 +376,10 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       // Return null instead of throwing
       return null;
     }
-  };
+  }, [socket, audioStream]);
 
   // Add a peer connection (receiver)
-  const addPeer = (incomingSignal, callerID, stream) => {
+  const addPeer = useCallback((incomingSignal, callerID, stream) => {
     if (!Peer) return null;
 
     try {
@@ -530,11 +537,21 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       // Return null instead of throwing
       return null;
     }
-  };
+  }, [socket, audioStream, roomId]);
 
   // Handle incoming voice chat connections
   useEffect(() => {
-    if (!socket || !peerLoaded) return;
+    if (!socket || !socket.connected) {
+      console.warn('⚠️ Socket not connected, cannot set up voice chat events');
+      return;
+    }
+    
+    if (!peerLoaded) {
+      console.warn('⚠️ Peer library not loaded, cannot set up voice chat events');
+      return;
+    }
+    
+    console.log('✅ Setting up voice chat socket events', { socketId: socket.id, roomId });
 
     // When a new user joins voice chat and we need to connect to them
     // This event is sent when someone who is already in voice chat wants to connect to us
@@ -557,7 +574,7 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
           };
           
           peersRef.current.push(peerObj);
-          setPeers(prev => [...prev, peerObj]);
+          // Peer state managed via peersRef
           // Initialize volume for this peer
           if (peerVolumeRefs.current[payload.callerID] === undefined) {
             peerVolumeRefs.current[payload.callerID] = 100;
@@ -591,7 +608,7 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
             peer
           };
           peersRef.current.push(peerObj);
-          setPeers(prev => [...prev, peerObj]);
+          // Peer state managed via peersRef
           // Initialize volume for this peer
           if (peerVolumeRefs.current[payload.userId] === undefined) {
             peerVolumeRefs.current[payload.userId] = 100;
@@ -635,7 +652,7 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
           } catch (e) {}
           // Remove from peers
           peersRef.current = peersRef.current.filter(p => p.peerID !== payload.requestingUserId);
-          setPeers(prev => prev.filter(p => p.peerID !== payload.requestingUserId));
+          // Peer state managed via peersRef
         }
         
         // Create new peer connection
@@ -643,7 +660,7 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
         if (peer) {
           const peerObj = { peerID: payload.requestingUserId, peer };
           peersRef.current.push(peerObj);
-          setPeers(prev => [...prev, peerObj]);
+          // Peer state managed via peersRef
           // Initialize volume for this peer if not already set
           if (peerVolumeRefs.current[payload.requestingUserId] === undefined) {
             peerVolumeRefs.current[payload.requestingUserId] = 100;
@@ -654,8 +671,9 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       }
     });
 
-    // When a user leaves
-    socket.on('user_left', payload => {
+    // When a user leaves voice chat
+    socket.on('user_left_voice', payload => {
+      console.log('👋 User left voice chat:', payload.userId);
       const peerObj = peersRef.current.find(p => p.peerID === payload.userId);
       if (peerObj) {
         try {
@@ -664,7 +682,56 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
             peerObj.peer.removeAllListeners();
             // Destroy peer connection
             if (typeof peerObj.peer.destroy === 'function') {
-          peerObj.peer.destroy();
+              peerObj.peer.destroy();
+            }
+          }
+        } catch (error) {
+          console.warn('Error destroying peer on user leave voice:', error);
+        }
+      }
+      
+      // Remove peer from list
+      peersRef.current = peersRef.current.filter(p => p.peerID !== payload.userId);
+      
+      // Remove audio element for this peer
+      const audioElement = document.querySelector(`audio[data-peer-id="${payload.userId}"]`);
+      if (audioElement) {
+        try {
+          if (audioElement.srcObject) {
+            audioElement.srcObject.getTracks().forEach(track => track.stop());
+          }
+          audioElement.remove();
+        } catch (e) {
+          console.warn('Error removing audio element:', e);
+        }
+      }
+      
+      // Clean up volume settings for this peer
+      delete peerVolumeRefs.current[payload.userId];
+      setPeerVolumes(prev => {
+        const updated = { ...prev };
+        delete updated[payload.userId];
+        return updated;
+      });
+      
+      // Notify parent component about peer mute status change
+      if (onPeerMuteChange) {
+        onPeerMuteChange(payload.userId, undefined);
+      }
+    });
+
+    // When a user leaves the room entirely
+    socket.on('user_left', payload => {
+      console.log('👋 User left room:', payload.userId);
+      const peerObj = peersRef.current.find(p => p.peerID === payload.userId);
+      if (peerObj) {
+        try {
+          if (peerObj.peer) {
+            // Remove all event listeners
+            peerObj.peer.removeAllListeners();
+            // Destroy peer connection
+            if (typeof peerObj.peer.destroy === 'function') {
+              peerObj.peer.destroy();
             }
           }
         } catch (error) {
@@ -672,9 +739,21 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
         }
       }
       
-      const newPeers = peersRef.current.filter(p => p.peerID !== payload.userId);
-      peersRef.current = newPeers;
-      setPeers(newPeers);
+      peersRef.current = peersRef.current.filter(p => p.peerID !== payload.userId);
+      
+      // Remove audio element for this peer
+      const audioElement = document.querySelector(`audio[data-peer-id="${payload.userId}"]`);
+      if (audioElement) {
+        try {
+          if (audioElement.srcObject) {
+            audioElement.srcObject.getTracks().forEach(track => track.stop());
+          }
+          audioElement.remove();
+        } catch (e) {
+          console.warn('Error removing audio element:', e);
+        }
+      }
+      
       // Clean up volume settings for this peer
       delete peerVolumeRefs.current[payload.userId];
       setPeerVolumes(prev => {
@@ -688,10 +767,11 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       socket.off('user_joined_voice');
       socket.off('receiving_returned_signal');
       socket.off('user_left');
+      socket.off('user_left_voice');
       socket.off('new_user_joined_voice');
       socket.off('retry_voice_connection');
     };
-  }, [socket, audioStream, peerLoaded, addPeer, createPeer]);
+  }, [socket, audioStream, peerLoaded, addPeer, createPeer, roomId, onPeerMuteChange]);
 
   // Handle mute/unmute
   const toggleMute = () => {
@@ -704,23 +784,8 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
     }
   };
 
-  // Handle volume change for incoming audio (global)
-  const handleVolumeChange = (e) => {
-    const newVolume = e.target.value;
-    setVolume(newVolume);
-    volumeRef.current = newVolume;
-    
-    // Apply volume to all audio elements (for backward compatibility)
-    document.querySelectorAll('#audio-container audio').forEach(audio => {
-      const peerId = audio.getAttribute('data-peer-id');
-      // Only update if no individual volume is set for this peer
-      if (!peerId || !peerVolumeRefs.current[peerId]) {
-      audio.volume = newVolume / 100;
-      }
-    });
-  };
 
-  // Handle volume change for a specific peer
+  // Handle volume change for a specific peer - used by App.js Participants section
   const handlePeerVolumeChange = (peerId, newVolume) => {
     setPeerVolumes(prev => ({
       ...prev,
@@ -734,6 +799,13 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
       audio.volume = newVolume / 100;
     }
   };
+  
+  // Expose handlePeerVolumeChange for use in App.js Participants section
+  useEffect(() => {
+    if (onPeerVolumesChange) {
+      onPeerVolumesChange(handlePeerVolumeChange);
+    }
+  }, [onPeerVolumesChange]);
 
   // Update volume for all audio elements when volume changes
   useEffect(() => {
@@ -828,78 +900,22 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          marginBottom: isMinimized ? '0' : '20px'
+          marginBottom: '20px'
         }}>
           <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '700' }}>🎤 Voice Chat</h3>
-          <button
-            onClick={() => setIsMinimized(!isMinimized)}
-            style={{
-              background: 'transparent',
-              border: '1px solid var(--border-color)',
-              borderRadius: '6px',
-              padding: '6px 12px',
-              cursor: 'pointer',
-              color: 'var(--text-primary)',
-              fontSize: '14px',
-              fontWeight: '600',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              transition: 'all 0.2s ease'
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'var(--bg-tertiary)';
-              e.currentTarget.style.borderColor = 'var(--text-primary)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
-              e.currentTarget.style.borderColor = 'var(--border-color)';
-            }}
-          >
-            {isMinimized ? '▼ Expand' : '▲ Minimize'}
-          </button>
-        </div>
-      )}
-      
-      {isMinimized && !noCard ? (
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '12px',
-          padding: '12px',
-          background: 'var(--bg-secondary)',
-          borderRadius: '8px',
-          border: '1px solid var(--border-color)'
-        }}>
           <span style={{
             padding: '6px 14px',
-            background: connectionStatus === 'connected' 
-              ? 'linear-gradient(135deg, #28a745, #20c997)'
-              : connectionStatus === 'connecting'
-              ? 'linear-gradient(135deg, #ffc107, #ff9800)'
-              : connectionStatus === 'error'
-              ? 'linear-gradient(135deg, #dc3545, #c82333)'
-              : 'var(--bg-tertiary)',
-            color: connectionStatus === 'disconnected' ? 'var(--text-secondary)' : 'white',
+            background: 'var(--bg-tertiary)',
+            color: 'var(--text-primary)',
             borderRadius: '8px',
-            fontSize: '12px',
+            fontSize: '13px',
             fontWeight: '600',
-            boxShadow: connectionStatus !== 'disconnected' ? '0 2px 4px rgba(0, 0, 0, 0.2)' : 'none'
+            border: '1px solid var(--border-color)'
           }}>
             {getStatusIcon()} {getStatusText()}
           </span>
-          {audioEnabled && (
-            <span style={{ 
-              color: 'var(--text-primary)', 
-              fontSize: '13px',
-              fontWeight: '500'
-            }}>
-              {peers.length} user{peers.length !== 1 ? 's' : ''} connected
-            </span>
-          )}
         </div>
-      ) : (
-        <>
+      )}
       
       {!peerLoaded && (
         <div style={{
@@ -939,243 +955,39 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false }) {
         </button>
 
         {audioEnabled && (
-          <>
-            <button
-              onClick={toggleMute}
-              style={{
-                background: micMuted 
-                  ? 'linear-gradient(135deg, #ffc107, #ff9800)' 
-                  : 'linear-gradient(135deg, #17a2b8, #138496)',
-                color: micMuted ? '#212529' : 'white',
-                minWidth: '120px',
-                padding: '12px 18px',
-                fontSize: '14px',
-                fontWeight: '600',
-                borderRadius: '8px',
-                border: 'none',
-                cursor: 'pointer',
-                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.2)',
-                transition: 'all 0.3s ease'
-              }}
-              onMouseEnter={(e) => {
-                e.target.style.transform = 'translateY(-2px)';
-                e.target.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.3)';
-              }}
-              onMouseLeave={(e) => {
-                e.target.style.transform = 'translateY(0)';
-                e.target.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.2)';
-              }}
-            >
-              {micMuted ? '🔇 Unmute' : '🔊 Mute'}
-            </button>
-
-            <div style={{ 
-              display: 'flex', 
-              alignItems: 'center', 
-              gap: '10px',
-              padding: '10px 16px',
-              background: 'var(--bg-tertiary)',
-              borderRadius: '12px',
-              border: '1px solid var(--border-color)'
-            }}>
-              <label htmlFor="volume" style={{ fontSize: '18px', cursor: 'pointer' }}>🔊</label>
-              <input
-                id="volume"
-                type="range"
-                min="0"
-                max="100"
-                value={volume}
-                onChange={handleVolumeChange}
-                style={{ 
-                  width: '100px',
-                  accentColor: '#007bff',
-                  cursor: 'pointer'
-                }}
-              />
-              <span style={{ 
-                fontSize: '13px', 
-                minWidth: '40px',
-                fontWeight: '600',
-                color: 'var(--text-primary)'
-              }}>
-                {volume}%
-              </span>
-            </div>
-          </>
-        )}
-      </div>
-
-      <div style={{ 
-        background: 'var(--bg-secondary)', 
-        padding: '18px', 
-        borderRadius: '12px',
-        border: '1px solid var(--border-color)',
-        boxShadow: 'var(--shadow-sm)'
-      }}>
-        <div style={{ 
-          marginBottom: '12px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '10px'
-        }}>
-          <strong style={{ color: 'var(--text-primary)', fontSize: '15px' }}>Status:</strong> 
-          <span style={{
-            padding: '6px 14px',
-            background: connectionStatus === 'connected' 
-              ? 'linear-gradient(135deg, #28a745, #20c997)'
-              : connectionStatus === 'connecting'
-              ? 'linear-gradient(135deg, #ffc107, #ff9800)'
-              : connectionStatus === 'error'
-              ? 'linear-gradient(135deg, #dc3545, #c82333)'
-              : 'var(--bg-tertiary)',
-            color: connectionStatus === 'disconnected' ? 'var(--text-secondary)' : 'white',
-            borderRadius: '8px',
-            fontSize: '13px',
-            fontWeight: '600',
-            boxShadow: connectionStatus !== 'disconnected' ? '0 2px 4px rgba(0, 0, 0, 0.2)' : 'none'
-          }}>
-            {getStatusIcon()} {getStatusText()}
-          </span>
-        </div>
-        
-        {audioEnabled && (
-          <>
-            <div style={{ 
-              display: 'flex', 
-              justifyContent: 'space-between', 
-              alignItems: 'center',
-              padding: '10px',
-              background: 'var(--bg-tertiary)',
+          <button
+            onClick={toggleMute}
+            style={{
+              background: micMuted 
+                ? 'linear-gradient(135deg, #ffc107, #ff9800)' 
+                : 'linear-gradient(135deg, #17a2b8, #138496)',
+              color: micMuted ? '#212529' : 'white',
+              minWidth: '160px',
+              padding: '12px 20px',
+              fontSize: '15px',
+              fontWeight: '700',
               borderRadius: '8px',
-              marginTop: '10px'
-            }}>
-              <span style={{ color: 'var(--text-primary)', fontWeight: '500' }}>
-                <strong>Connected:</strong> {peers.length} user{peers.length !== 1 ? 's' : ''}
-            </span>
-            {micMuted && (
-                <span style={{ 
-                  color: '#ffc107', 
-                  fontSize: '13px',
-                  fontWeight: '600',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  padding: '4px 10px',
-                  background: 'rgba(255, 193, 7, 0.1)',
-                  borderRadius: '6px'
-                }}>
-                🔇 Microphone muted
-              </span>
-            )}
-          </div>
-            
-            {/* Individual volume controls for each participant */}
-            {peers.length > 0 && (
-              <div style={{ 
-                marginTop: '16px',
-                padding: '12px',
-                background: 'var(--bg-tertiary)',
-                borderRadius: '8px',
-                border: '1px solid var(--border-color)'
-              }}>
-                <strong style={{ 
-                  color: 'var(--text-primary)', 
-                  fontSize: '14px',
-                  display: 'block',
-                  marginBottom: '12px'
-                }}>
-                  🔊 Participant Volumes:
-                </strong>
-                {peers.map((peerObj) => {
-                  const peerId = peerObj.peerID; // This is socket.id
-                  const peerVolume = peerVolumes[peerId] !== undefined ? peerVolumes[peerId] : 100;
-                  // Find user info from users array - match by socketId first, then userId
-                  const peerUser = users.find(u => u.socketId === peerId || u.userId === peerId) || { username: `Guest-${peerId.substring(0, 6)}` };
-                  const displayName = peerUser.username || `Guest-${peerId.substring(0, 6)}`;
-                  
-                  return (
-                    <div key={peerId} style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '10px',
-                      padding: '8px',
-                      marginBottom: '8px',
-                      background: 'var(--bg-secondary)',
-                      borderRadius: '6px',
-                      border: '1px solid var(--border-color)'
-                    }}>
-                      <span style={{ 
-                        fontSize: '12px', 
-                        color: 'var(--text-primary)',
-                        minWidth: '80px',
-                        fontWeight: '500'
-                      }}>
-                        {displayName}:
-                      </span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        value={peerVolume}
-                        onChange={(e) => handlePeerVolumeChange(peerId, parseInt(e.target.value))}
-                        style={{ 
-                          flex: 1,
-                          accentColor: '#007bff',
-                          cursor: 'pointer'
-                        }}
-                      />
-                      <span style={{ 
-                        fontSize: '12px', 
-                        minWidth: '35px',
-                        fontWeight: '600',
-                        color: 'var(--text-primary)',
-                        textAlign: 'right'
-                      }}>
-                        {peerVolume}%
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </>
-        )}
-
-        {!audioEnabled && peerLoaded && (
-          <div style={{ 
-            color: 'var(--text-secondary)', 
-            fontSize: '13px', 
-            marginTop: '12px',
-            padding: '12px',
-            background: 'var(--bg-tertiary)',
-            borderRadius: '8px',
-            textAlign: 'center',
-            lineHeight: '1.6'
-          }}>
-            💡 Click "Join Voice" to start talking with others in the room
-          </div>
-        )}
-
-        {connectionStatus === 'error' && (
-          <div style={{ 
-            color: '#dc3545', 
-            fontSize: '13px', 
-            marginTop: '12px',
-            padding: '12px',
-            background: 'rgba(220, 53, 69, 0.1)',
-            borderRadius: '8px',
-            border: '1px solid rgba(220, 53, 69, 0.3)',
-            fontWeight: '500'
-          }}>
-            ⚠️ Voice chat error. Please check your microphone and try again.
-          </div>
+              border: 'none',
+              cursor: 'pointer',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.2)',
+              transition: 'all 0.3s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.target.style.transform = 'translateY(-2px)';
+              e.target.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.3)';
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.transform = 'translateY(0)';
+              e.target.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.2)';
+            }}
+          >
+            {micMuted ? '🔇 Unmute' : '🔊 Mute'}
+          </button>
         )}
       </div>
 
       {/* Hidden container for audio elements */}
       <div id="audio-container" style={{ display: 'none' }}></div>
-        </>
-      )}
     </div>
   );
 }

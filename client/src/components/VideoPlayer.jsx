@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react';
+import React, { useEffect, useRef, useState, forwardRef, useImperativeHandle, useCallback } from 'react';
 import { useNotifications } from './NotificationSystem';
 
 const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isHost, room }, ref) => {
@@ -6,19 +6,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const videoRef = useRef(null);
   const youtubePlayerRef = useRef(null);
   const youtubeContainerRef = useRef(null);
-  const fileInputRef = useRef(null);
   const [videoUrl, setVideoUrl] = useState(initialVideo?.url || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4');
   const [videoTitle, setVideoTitle] = useState(initialVideo?.title || 'Sample Video - Big Buck Bunny');
   const [newVideoUrl, setNewVideoUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [currentVideoFile, setCurrentVideoFile] = useState(null);
   const [playerError, setPlayerError] = useState('');
   const [isSyncing, setIsSyncing] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [isUploading, setIsUploading] = useState(false);
-  const [hostVideo, setHostVideo] = useState(null);
-  const [videoLibrary, setVideoLibrary] = useState([]);
-  const [showLibrary, setShowLibrary] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [showSpeedDropdown, setShowSpeedDropdown] = useState(false);
   const speedSyncInProgress = useRef(false);
@@ -27,16 +20,36 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
   const youtubeSyncInProgress = useRef(false);
   const [isHLS, setIsHLS] = useState(false);
   const hlsRef = useRef(null);
-  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [showMobilePlayPrompt, setShowMobilePlayPrompt] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [videoPaused, setVideoPaused] = useState(true);
   const autoplayAttemptedRef = useRef(false);
+  const [showSyncMenu, setShowSyncMenu] = useState(false);
   
   // Detect Chrome and Brave browsers (they have stricter autoplay policies)
   const isChromeOrBrave = () => {
     const ua = navigator.userAgent.toLowerCase();
     return ua.includes('chrome') || ua.includes('brave') || ua.includes('edg');
+  };
+  
+  // Helper function to check if HLS time is buffered (with tolerance)
+  const isHLSTimeBuffered = (hls, time, tolerance = 2.0) => {
+    if (!hls || !hls.media || !hls.media.buffered.length) return false;
+    for (let i = 0; i < hls.media.buffered.length; i++) {
+      const start = hls.media.buffered.start(i);
+      const end = hls.media.buffered.end(i);
+      // Check if time is within buffered range, or within tolerance
+      if (time >= start - tolerance && time <= end + tolerance) {
+        return true;
+      }
+    }
+    return false;
+  };
+  
+  // Helper function to check if HLS has any buffered data
+  const hasHLSBufferedData = (hls) => {
+    if (!hls || !hls.media || !hls.media.buffered.length) return false;
+    return hls.media.buffered.length > 0;
   };
   
   // Detect mobile device - check on mount and window resize
@@ -69,11 +82,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
   
-  // Detect mobile device function
-  const isMobileDevice = () => {
+  // Detect mobile device function - moved outside to avoid dependency issues
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const isMobileDevice = useCallback(() => {
     return isMobile || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
            (window.innerWidth <= 768 && 'ontouchstart' in window);
-  };
+  }, [isMobile]);
   
   // Periodic check for mobile video state to ensure overlay shows
   // Especially important for Chrome/Brave browsers
@@ -124,28 +138,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     current: videoRef.current
   }));
 
-  // Fetch video library when room changes
-  useEffect(() => {
-    if (!roomId) return;
-    
-    const fetchVideoLibrary = async () => {
-      try {
-        const apiUrl = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
-        const response = await fetch(`${apiUrl}/api/rooms/${roomId}/videos`);
-        if (response.ok) {
-          const data = await response.json();
-          setVideoLibrary(data.library || []);
-          if (data.currentVideo?.url) {
-            setHostVideo(data.currentVideo);
-          }
-        }
-      } catch (error) {
-        console.error('Error fetching video library:', error);
-      }
-    };
-    
-    fetchVideoLibrary();
-  }, [roomId]);
 
   // Check if current video URL is YouTube or HLS and update state
   useEffect(() => {
@@ -237,11 +229,15 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 if (socket && roomId && !syncInProgress.current) {
                   // Use requestAnimationFrame for immediate emission
                   requestAnimationFrame(() => {
-                    socket.emit('video_play', {
-                      roomId,
-                      currentTime,
-                      initiatedBy: currentUser
-                    });
+                    if (socket && socket.connected) {
+                      socket.emit('video_play', {
+                        roomId,
+                        currentTime,
+                        initiatedBy: currentUser
+                      });
+                    } else {
+                      console.warn('⚠️ Socket not connected, cannot emit video_play');
+                    }
                   });
                 }
               } else if (event.data === window.YT.PlayerState.PAUSED) {
@@ -250,11 +246,15 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 if (socket && roomId && !syncInProgress.current) {
                   // Use requestAnimationFrame for immediate emission
                   requestAnimationFrame(() => {
-                    socket.emit('video_pause', {
-                      roomId,
-                      currentTime,
-                      initiatedBy: currentUser
-                    });
+                    if (socket && socket.connected) {
+                      socket.emit('video_pause', {
+                        roomId,
+                        currentTime,
+                        initiatedBy: currentUser
+                      });
+                    } else {
+                      console.warn('⚠️ Socket not connected, cannot emit video_pause');
+                    }
                   });
                 }
               }
@@ -313,8 +313,14 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       console.log('📺 Initializing HLS.js for:', videoUrl);
       const hls = new window.Hls({
         enableWorker: true,
-        lowLatencyMode: false,
-        backBufferLength: 90
+        maxBufferLength: 30,           // Max buffer length in seconds
+        maxMaxBufferLength: 60,        // Maximum max buffer length
+        liveSyncDuration: 5,           // Live sync duration
+        liveMaxLatencyDuration: 10,    // Maximum latency for live streams
+        maxFragLookUpTolerance: 0.3,   // Fragment lookup tolerance
+        nudgeOffset: 0.2,              // Nudge offset for sync
+        lowLatencyMode: false,          // Low latency mode disabled
+        debug: false                    // Debug mode disabled (set to true for troubleshooting)
       });
       
       hls.loadSource(videoUrl);
@@ -325,9 +331,34 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         videoInitialized.current = true;
       });
       
+      // Listen for level loaded event (segment loaded)
+      hls.on(window.Hls.Events.LEVEL_LOADED, () => {
+        console.log('✅ HLS level loaded, segments ready');
+      });
+      
+      // Listen for fragment parsed event (more reliable than FRAG_LOADED)
+      hls.on(window.Hls.Events.FRAG_PARSED, () => {
+        // Fragment parsed and ready
+      });
+      
+      // Listen for fragment buffered event
+      hls.on(window.Hls.Events.FRAG_BUFFERED, () => {
+        // Fragment buffered, ready for playback
+      });
+      
       hls.on(window.Hls.Events.ERROR, (event, data) => {
-        console.error('❌ HLS error:', data);
+        // Filter out expected non-fatal errors that HLS.js handles automatically
+        const expectedNonFatalErrors = [
+          'bufferSeekOverHole', // Common when seeking to unbuffered time
+          'bufferStalledError', // Temporary buffering issue
+          'bufferAppendingError', // Segment appending issue (usually recovers)
+        ];
+        
+        const isExpectedNonFatal = !data.fatal && expectedNonFatalErrors.includes(data.details);
+        
         if (data.fatal) {
+          // Always log fatal errors
+          console.error('❌ HLS fatal error:', data);
           switch (data.type) {
             case window.Hls.ErrorTypes.NETWORK_ERROR:
               console.log('🔄 Fatal network error, trying to recover...');
@@ -343,7 +374,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               setPlayerError('HLS playback error');
               break;
           }
+        } else if (!isExpectedNonFatal) {
+          // Log unexpected non-fatal errors (for debugging)
+          console.warn('⚠️ HLS non-fatal error:', data.details || data.type);
         }
+        // Silently ignore expected non-fatal errors - HLS.js handles them automatically
       });
       
       hlsRef.current = hls;
@@ -352,7 +387,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       setPlayerError('HLS.js library is required for HLS streams. Please refresh the page.');
     } else {
       // Set video source for regular videos
-      video.src = videoUrl;
+    video.src = videoUrl;
     }
     
     // Video event listeners with debouncing
@@ -401,13 +436,17 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         const currentTime = video.currentTime;
         const eventId = ++lastEventIdRef.current;
         console.log(`🎬 User control: Emitting play at time: ${currentTime} (eventId: ${eventId})`);
-        socket.emit('video_play', { 
-          roomId, 
-          currentTime, 
-          initiatedBy: currentUser,
-          eventId,
-          timestamp: now
-        });
+        if (socket && socket.connected) {
+          socket.emit('video_play', { 
+            roomId, 
+            currentTime, 
+            initiatedBy: currentUser,
+            eventId,
+            timestamp: now
+          });
+        } else {
+          console.warn('⚠️ Socket not connected, cannot emit video_play');
+        }
         lastEventTime.current = now;
       }
     };
@@ -431,23 +470,33 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         const currentTime = video.currentTime;
         const eventId = ++lastEventIdRef.current;
         console.log(`⏸️ User control: Emitting pause at time: ${currentTime} (eventId: ${eventId})`);
-        socket.emit('video_pause', { 
-          roomId, 
-          currentTime, 
-          initiatedBy: currentUser,
-          eventId,
-          timestamp: now
-        });
+        if (socket && socket.connected) {
+          socket.emit('video_pause', { 
+            roomId, 
+            currentTime, 
+            initiatedBy: currentUser,
+            eventId,
+            timestamp: now
+          });
+        } else {
+          console.warn('⚠️ Socket not connected, cannot emit video_pause');
+        }
         lastEventTime.current = now;
       }
     };
 
     const handleSeeked = () => {
       const now = Date.now();
-      // Increased to 3000ms to prevent cascading events with multiple users (3-10 users)
-      // Be less strict - don't require videoInitialized, just check readyState
-      if (ignoreNextEvent.current || syncInProgress.current || now - lastEventTime.current < 3000) {
+      // Reduced to 500ms for seeks - seeks are critical and should be synced quickly
+      // Only ignore if we're currently syncing from another user's action
+      if (ignoreNextEvent.current) {
         ignoreNextEvent.current = false;
+        return;
+      }
+      
+      // Allow seeks even if sync is in progress (seeks override other syncs)
+      // But prevent rapid-fire seeks (debounce to 500ms)
+      if (now - lastEventTime.current < 500) {
         return;
       }
       
@@ -460,15 +509,74 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       if (socket && roomId && !isSyncing) {
         const currentTime = video.currentTime;
         const eventId = ++lastEventIdRef.current;
-        console.log(`⏭️ User control: Emitting seek to time: ${currentTime} (eventId: ${eventId})`);
-        socket.emit('video_seek', { 
-          roomId, 
-          currentTime, 
-          initiatedBy: currentUser,
-          eventId,
-          timestamp: now
-        });
+        
+        // For HLS streams, wait for segment to be buffered before emitting seek
+        if (isHLS && hlsRef.current) {
+          const hls = hlsRef.current;
+          const targetTime = currentTime;
+          
+          // Helper function to emit seek after buffering is verified
+          const emitSeekAfterBuffering = () => {
+            const buffered = isHLSTimeBuffered(hls, targetTime);
+            const actualTime = video.currentTime;
+            const timeDiff = Math.abs(actualTime - targetTime);
+            
+            if (buffered && timeDiff <= 0.5) {
+              console.log(`⏭️ HLS seek verified, emitting seek to time: ${currentTime} (eventId: ${eventId})`);
+              if (socket && socket.connected) {
+                socket.emit('video_seek', { 
+                  roomId, 
+                  currentTime, 
+                  initiatedBy: currentUser,
+                  eventId,
+                  timestamp: now
+                });
+              } else {
+                console.warn('⚠️ Socket not connected, cannot emit video_seek');
+              }
         lastEventTime.current = now;
+            } else {
+              // Wait a bit more for buffering
+              setTimeout(emitSeekAfterBuffering, 200);
+            }
+          };
+          
+          // Listen for fragment buffered event
+          const onFragBuffered = () => {
+            if (isHLSTimeBuffered(hls, targetTime)) {
+              emitSeekAfterBuffering();
+              hls.off(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+            }
+          };
+          hls.once(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+          
+          // Also listen for fragment parsed as fallback
+          const onFragParsed = () => {
+            if (isHLSTimeBuffered(hls, targetTime)) {
+              emitSeekAfterBuffering();
+              hls.off(window.Hls.Events.FRAG_PARSED, onFragParsed);
+            }
+          };
+          hls.once(window.Hls.Events.FRAG_PARSED, onFragParsed);
+          
+          // Start checking after delay
+          setTimeout(emitSeekAfterBuffering, 300);
+        } else {
+          // For non-HLS videos, emit immediately
+          console.log(`⏭️ User control: Emitting seek to time: ${currentTime.toFixed(2)}s (eventId: ${eventId})`);
+          if (socket && socket.connected) {
+            socket.emit('video_seek', { 
+              roomId, 
+              currentTime, 
+              initiatedBy: currentUser,
+              eventId,
+              timestamp: now
+            });
+          } else {
+            console.warn('⚠️ Socket not connected, cannot emit video_seek');
+          }
+          lastEventTime.current = now;
+        }
       }
     };
 
@@ -500,7 +608,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       if (isMobileDevice() && autoplayAttemptedRef.current && video.paused) {
         setTimeout(() => {
           setShowMobilePlayPrompt(true);
-          setAutoplayBlocked(true);
           setVideoPaused(true);
         }, 500); // Small delay to ensure video is fully ready
       }
@@ -525,10 +632,10 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
 
     // Wait for video to be ready (skip for HLS as it handles its own ready event)
     if (!isHLS) {
-      if (video.readyState >= 2) {
-        handleVideoReady();
-      } else {
-        video.addEventListener('loadeddata', handleVideoReady, { once: true });
+    if (video.readyState >= 2) {
+      handleVideoReady();
+    } else {
+      video.addEventListener('loadeddata', handleVideoReady, { once: true });
       }
     }
 
@@ -552,11 +659,16 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         }
       }
     };
-  }, [videoUrl, isHLS, currentUser, initialVideo, isSyncing, isYouTube, roomId, socket]); // Include all dependencies
+  }, [videoUrl, isHLS, currentUser, initialVideo, isSyncing, isYouTube, roomId, socket, isMobileDevice]); // Include all dependencies
 
   // Listen for socket events with improved logic
   useEffect(() => {
-    if (!socket) return;
+    if (!socket || !socket.connected) {
+      console.warn('⚠️ Socket not connected, cannot set up video sync events');
+      return;
+    }
+    
+    console.log('✅ Setting up video sync socket events', { socketId: socket.id, roomId, currentUser });
 
     // Update dependency to include isYouTube
 
@@ -631,15 +743,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       const socketId = socket?.id;
       
       // Check if video URL is set - if not, request sync state
-      // Note: We allow the default sample video URL, but if it's still the default and we're in a room,
-      // we should request the actual video state
-      const isDefaultVideo = videoUrl === 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';
-      if (!videoUrl || (isDefaultVideo && roomId)) {
-        console.log('⏳ Video URL not set or is default, requesting sync state...');
+      // Only block if video URL is completely empty, not if it's a sample video
+      if (!videoUrl) {
+        console.log('⏳ Video URL not set, requesting sync state...');
         if (socket && roomId) {
           socket.emit('request_video_state', { roomId });
         }
-        // Don't process play event until we have the correct video URL
+        // Don't process play event until we have a video URL
         // The sync state handler will handle setting the video and playing it
         return;
       }
@@ -693,27 +803,41 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       }
 
       try {
-        // For HLS streams, ensure HLS instance is ready
+        // For HLS streams, ensure HLS instance is ready with better detection
         if (isHLS && hlsRef.current) {
           const hls = hlsRef.current;
-          // Check if HLS is ready (manifest parsed)
+          let retryCount = 0;
+          const maxRetries = 10;
+          
+          // Check if HLS is ready (manifest parsed and level loaded)
           if (hls.media && hls.media.readyState >= 2) {
             console.log('✅ HLS ready, syncing play...');
             syncVideoPlay(video, data.currentTime);
           } else {
-            console.log('⏳ HLS not ready, waiting for manifest...');
-            // Wait for HLS to be ready
+            console.log('⏳ HLS not ready, waiting for manifest and level...');
+            // Wait for HLS to be ready with retry logic
             const checkHLSReady = () => {
               if (hls.media && hls.media.readyState >= 2) {
                 console.log('✅ HLS ready, now syncing...');
                 syncVideoPlay(video, data.currentTime);
               } else {
-                setTimeout(checkHLSReady, 100);
+                if (retryCount < maxRetries) {
+                  retryCount++;
+                  setTimeout(checkHLSReady, 200);
+                } else {
+                  console.warn('⚠️ HLS not ready after retries, attempting sync anyway');
+                  syncVideoPlay(video, data.currentTime);
+                }
               }
             };
-            // Also listen for manifest parsed event
+            // Listen for manifest parsed event
             hls.once(window.Hls.Events.MANIFEST_PARSED, () => {
               console.log('✅ HLS manifest parsed, syncing play...');
+              syncVideoPlay(video, data.currentTime);
+            });
+            // Also listen for level loaded event
+            hls.once(window.Hls.Events.LEVEL_LOADED, () => {
+              console.log('✅ HLS level loaded, syncing play...');
               syncVideoPlay(video, data.currentTime);
             });
             checkHLSReady();
@@ -732,8 +856,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           
           const waitForReady = () => {
             waitCount++;
-            if (video.readyState >= 2) {
-              console.log('✅ Video ready, now syncing...');
+            // Be more lenient - allow readyState >= 1 (HAVE_METADATA) for regular videos
+            if (video.readyState >= 1) {
+              console.log('✅ Video ready (readyState:', video.readyState, '), now syncing...');
               syncVideoPlay(video, data.currentTime);
             } else if (waitCount < maxWait) {
               setTimeout(waitForReady, 100);
@@ -786,12 +911,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           }
           // For HLS, we can be more lenient - try to play even if not fully ready
         } else {
-          // For regular videos, check readyState but be lenient
-          if (video.readyState < 1) {
-            console.warn('⚠️ Video not ready for sync play (readyState:', video.readyState, '), retrying...');
-            setTimeout(() => syncVideoPlay(video, targetTime), 200);
-            return;
-          }
+          // For regular videos, be very lenient - try to play even if not fully ready
+          // The browser will handle buffering automatically
+          // Only check if video element exists (already checked above)
         }
         
         const timeDiff = Math.abs(video.currentTime - targetTime);
@@ -801,41 +923,98 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           console.log(`⏭️ Seeking from ${video.currentTime} to ${targetTime}`);
           video.currentTime = targetTime;
           
-          // For HLS streams, wait a bit longer for buffering before playing
+          // For HLS streams, wait longer for buffering before playing
           if (isHLS && hlsRef.current) {
-            // HLS streams need time to buffer the segment
-            setTimeout(() => {
-              if (!video.paused) {
-                console.log('✅ Video already playing after seek');
-                return; // Already playing
-              }
-              console.log('▶️ Starting HLS playback after seek...');
-              video.play().catch(err => {
-                if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
-                  console.error('HLS sync play failed:', err);
-                } else if (err.name === 'NotAllowedError') {
-                  console.log('ℹ️ Autoplay blocked - user interaction required');
-                  setAutoplayBlocked(true);
-                  if (isMobileDevice()) {
-                    setShowMobilePlayPrompt(true);
-                    autoplayAttemptedRef.current = true;
+            const hls = hlsRef.current;
+            // HLS streams need more time to buffer the segment
+            // Use HLS.js events to detect when segment is ready
+            let seekVerified = false;
+            let retryCount = 0;
+            const maxRetries = 5;
+            
+            const verifyAndPlay = () => {
+              const actualTime = video.currentTime;
+              const timeDiff = Math.abs(actualTime - targetTime);
+              const buffered = isHLSTimeBuffered(hls, targetTime);
+              
+              // Check if seek completed and segment is buffered
+              if ((timeDiff <= 0.5 || seekVerified) && (buffered || hls.media.readyState >= 3)) {
+                seekVerified = true;
+                if (!video.paused) {
+                  console.log('✅ HLS video already playing after seek');
+                  return;
+                }
+                
+                // Check if HLS has buffered enough data
+                if (hls.media && hls.media.readyState >= 2) {
+                  console.log('▶️ Starting HLS playback after seek...');
+                  video.play().catch(err => {
+                    if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
+                      console.error('HLS sync play failed:', err);
+                    } else if (err.name === 'NotAllowedError') {
+                      console.log('ℹ️ Autoplay blocked - user interaction required');
+                      if (isMobileDevice()) {
+                        setShowMobilePlayPrompt(true);
+                        autoplayAttemptedRef.current = true;
+                      }
+                    }
+                  });
+                } else {
+                  // Wait a bit more for buffering
+                  if (retryCount < maxRetries) {
+                    retryCount++;
+                    setTimeout(verifyAndPlay, 300);
                   }
                 }
-              });
-            }, 300); // Increased delay for HLS buffering
+              } else {
+                // Seek not complete or not buffered, retry
+                if (retryCount < maxRetries) {
+                  retryCount++;
+                  console.log(`🔄 HLS seek retry ${retryCount}/${maxRetries}: timeDiff=${timeDiff.toFixed(2)}s, buffered=${buffered}`);
+                  video.currentTime = targetTime;
+                  setTimeout(verifyAndPlay, 300);
+                } else {
+                  console.warn('⚠️ HLS seek verification failed after retries');
+                  // Try to play anyway if time is close
+                  if (timeDiff <= 1.0 && hls.media && hls.media.readyState >= 2) {
+                    video.play().catch(err => console.error('HLS play failed:', err));
+                  }
+                }
+              }
+            };
+            
+            // Listen for fragment buffered event (more reliable)
+            const onFragBuffered = () => {
+              if (isHLSTimeBuffered(hls, targetTime)) {
+                seekVerified = true;
+                hls.off(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+              }
+            };
+            hls.once(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+            
+            // Also listen for fragment parsed as fallback
+            const onFragParsed = () => {
+              if (isHLSTimeBuffered(hls, targetTime)) {
+                seekVerified = true;
+                hls.off(window.Hls.Events.FRAG_PARSED, onFragParsed);
+              }
+            };
+            hls.once(window.Hls.Events.FRAG_PARSED, onFragParsed);
+            
+            // Start verification after initial delay (increased for HLS)
+            setTimeout(verifyAndPlay, 800); // Increased to 800ms for HLS buffering
             return; // Exit early, play will happen in setTimeout
           }
           
           // For regular videos, wait a moment for seek to complete
           setTimeout(() => {
-            if (video.paused) {
+        if (video.paused) {
               console.log('▶️ Starting playback after seek...');
               video.play().catch(err => {
                 if (err.name !== 'AbortError' && err.name !== 'NotAllowedError') {
                   console.error('Sync play failed:', err);
                 } else if (err.name === 'NotAllowedError') {
                   console.log('ℹ️ Autoplay blocked - user interaction required');
-                  setAutoplayBlocked(true);
                   if (isMobileDevice()) {
                     setShowMobilePlayPrompt(true);
                     autoplayAttemptedRef.current = true;
@@ -856,7 +1035,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               console.error('Sync play failed:', err);
             } else if (err.name === 'NotAllowedError') {
               console.log('ℹ️ Autoplay blocked - user interaction required');
-              setAutoplayBlocked(true);
               // Show mobile play prompt if on mobile
               if (isMobileDevice()) {
                 setShowMobilePlayPrompt(true);
@@ -867,7 +1045,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           });
         } else {
           console.log('✅ Video already playing');
-          setAutoplayBlocked(false);
           setShowMobilePlayPrompt(false);
         }
       } catch (error) {
@@ -1081,7 +1258,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     const handleVideoSeek = (data) => {
       // Check if we've already processed this event (by eventId or timestamp)
       const eventKey = `${data.eventId || data.timestamp || Date.now()}-${data.initiatedBy}`;
-      if (lastSyncTimeRef.current === eventKey && !syncInProgress.current) {
+      if (lastSyncTimeRef.current === eventKey) {
         console.log('🚫 Ignoring duplicate seek event:', eventKey);
         return;
       }
@@ -1092,18 +1269,16 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                         data.socketId === socketId ||
                         data.socketId === currentUser;
       
-      if (isOwnEvent && !syncInProgress.current) {
+      if (isOwnEvent) {
         console.log('🚫 Ignoring own seek event');
-        return;
-      }
-      
-      if (syncInProgress.current) {
-        console.log('🚫 Ignoring seek event - sync in progress');
         return;
       }
       
       // Store event key to prevent duplicate processing
       lastSyncTimeRef.current = eventKey;
+      
+      // Seeks are critical - always process them, even if sync is in progress
+      // This ensures users stay in sync when someone seeks
       
       // Handle YouTube player
       if (isYouTube && youtubePlayerRef.current) {
@@ -1133,7 +1308,20 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       if (!videoRef.current) return;
       
       const video = videoRef.current;
-      console.log('🔄 Received seek sync from another user to time:', data.currentTime);
+      const currentTime = video.currentTime;
+      const targetTime = data.currentTime;
+      const timeDiff = Math.abs(currentTime - targetTime);
+      
+      // Only seek if there's a significant difference (at least 0.5 seconds)
+      // This prevents unnecessary seeks and improves performance
+      if (timeDiff < 0.5) {
+        console.log(`⏭️ Seek skipped - time difference too small: ${timeDiff.toFixed(2)}s (current: ${currentTime.toFixed(2)}s, target: ${targetTime.toFixed(2)}s)`);
+        return;
+      }
+      
+      console.log(`🔄 Received seek sync from another user: ${currentTime.toFixed(2)}s → ${targetTime.toFixed(2)}s (diff: ${timeDiff.toFixed(2)}s)`);
+      
+      // Set sync flags to prevent our own seek event from being emitted
       syncInProgress.current = true;
       setIsSyncing(true);
       ignoreNextEvent.current = true;
@@ -1143,30 +1331,93 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       }
 
       try {
-        video.currentTime = data.currentTime;
-        console.log('⏭️ Synced seek to time:', data.currentTime);
+        video.currentTime = targetTime;
+        console.log(`⏭️ Synced seek to time: ${targetTime.toFixed(2)}s`);
         
-        // For HLS streams, ensure proper buffering after seek
+        // For HLS streams, ensure proper buffering after seek with retry logic
         if (isHLS && hlsRef.current) {
-          // HLS might need a moment to load the segment at the new position
-          // The video element will handle this, but we can wait a bit
-          setTimeout(() => {
-            // Verify the seek completed
+          const hls = hlsRef.current;
+          let retryCount = 0;
+          const maxRetries = 5;
+          
+          const verifySeek = () => {
             const actualTime = video.currentTime;
             const timeDiff = Math.abs(actualTime - data.currentTime);
-            if (timeDiff > 1) {
-              console.log(`⚠️ HLS seek may not have completed. Expected: ${data.currentTime}, Actual: ${actualTime}`);
+            const buffered = isHLSTimeBuffered(hls, data.currentTime);
+            
+            if (timeDiff <= 0.5 && buffered) {
+              console.log(`✅ HLS seek verified: ${actualTime.toFixed(2)}s (target: ${data.currentTime.toFixed(2)}s), buffered: ${buffered}`);
+            } else {
+              // Seek not accurate or not buffered, retry
+              if (retryCount < maxRetries) {
+                retryCount++;
+                console.log(`🔄 HLS seek retry ${retryCount}/${maxRetries}: Expected ${data.currentTime.toFixed(2)}s, got ${actualTime.toFixed(2)}s, buffered: ${buffered}`);
+                video.currentTime = data.currentTime;
+                setTimeout(verifySeek, 400);
+              } else {
+                console.warn(`⚠️ HLS seek may not have completed after ${maxRetries} retries. Expected: ${data.currentTime.toFixed(2)}s, Actual: ${actualTime.toFixed(2)}s, Buffered: ${buffered}`);
+              }
             }
-          }, 300);
+          };
+          
+          // Listen for fragment buffered event (more reliable)
+          const onFragBuffered = () => {
+            if (isHLSTimeBuffered(hls, data.currentTime)) {
+              verifySeek();
+              hls.off(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+            }
+          };
+          hls.once(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+          
+          // Also listen for fragment parsed as fallback
+          const onFragParsed = () => {
+            if (isHLSTimeBuffered(hls, data.currentTime)) {
+              verifySeek();
+              hls.off(window.Hls.Events.FRAG_PARSED, onFragParsed);
+            }
+          };
+          hls.once(window.Hls.Events.FRAG_PARSED, onFragParsed);
+          
+          // Start verification after delay (increased for HLS)
+          setTimeout(verifySeek, 700);
+          
+          // Reset sync flags after HLS seek completes (longer timeout for buffering)
+          if (syncTimeoutRef.current) {
+            clearTimeout(syncTimeoutRef.current);
+          }
+          syncTimeoutRef.current = setTimeout(() => {
+            syncInProgress.current = false;
+            setIsSyncing(false);
+            ignoreNextEvent.current = false;
+            console.log('✅ HLS seek sync completed');
+          }, 2500);
+        } else {
+          // For regular videos, seek is immediate - reset flags after short delay
+          if (syncTimeoutRef.current) {
+            clearTimeout(syncTimeoutRef.current);
+          }
+          syncTimeoutRef.current = setTimeout(() => {
+            syncInProgress.current = false;
+            setIsSyncing(false);
+            ignoreNextEvent.current = false;
+            console.log('✅ Regular video seek sync completed');
+          }, 800);
         }
       } catch (error) {
         console.error('Error in sync seek:', error);
+        // Reset flags on error
+        syncInProgress.current = false;
+        setIsSyncing(false);
+        ignoreNextEvent.current = false;
       }
 
-      syncTimeoutRef.current = setTimeout(() => {
-        setIsSyncing(false);
-        syncInProgress.current = false;
-      }, 3000);
+      // After seek is complete, request current room state to sync play/pause
+      // This ensures we're in sync with the play/pause state after seeking
+      setTimeout(() => {
+        if (socket && socket.connected && roomId) {
+          socket.emit('request_video_state', { roomId });
+        }
+      }, 1500);
     };
 
     const handleVideoUrlChange = (data) => {
@@ -1193,49 +1444,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       });
     };
 
-    const handleVideoUploaded = (data) => {
-      console.log('🎬 User uploaded a video:', data);
-      
-      // Add to library
-      setVideoLibrary(prev => [...prev, data]);
-      
-      // Automatically load the uploaded video for all users
-      setVideoUrl(data.videoUrl);
-      setVideoTitle(data.videoTitle);
-      setHostVideo(data);
-      setCurrentVideoFile(null);
-      setPlayerError('');
-      
-      // Show notification to other users
-      if (data.uploadedBy !== currentUser) {
-        showNotification({
-          type: NOTIFICATION_TYPES.SUCCESS,
-          title: 'Video Uploaded',
-          message: `${data.uploadedBy || 'Someone'} uploaded: ${data.videoTitle}`,
-          icon: '📁',
-          key: 'videoUploaded',
-          duration: 5000
-        });
-      } else {
-        // Show success notification to the uploader
-        showNotification({
-          type: NOTIFICATION_TYPES.SUCCESS,
-          title: 'Upload Successful',
-          message: `Video "${data.videoTitle}" uploaded successfully!`,
-          icon: '✅',
-          key: 'videoUploaded',
-          duration: 4000
-        });
-      }
-    };
 
     const handleVideoSelected = (data) => {
       console.log('🎬 User selected video:', data);
       
       setVideoUrl(data.videoUrl);
       setVideoTitle(data.videoTitle);
-      setHostVideo(data);
-      setCurrentVideoFile(null);
       setPlayerError('');
       
       if (data.selectedBy !== currentUser) {
@@ -1337,50 +1551,118 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         } else if (videoRef.current) {
           const video = videoRef.current;
           
-          // For HLS streams, wait for HLS to be ready
+          // For HLS streams, wait for HLS to be ready with better state detection
           if (isHLS && hlsRef.current) {
             const hls = hlsRef.current;
+            let retryCount = 0;
+            const maxRetries = 10;
+            
             const applyHLSState = () => {
               if (hls.media && hls.media.readyState >= 2) {
                 const targetTime = data.currentTime || 0;
                 const timeDiff = Math.abs(video.currentTime - targetTime);
                 
                 if (timeDiff > 0.5) {
+                  console.log(`🔄 HLS sync: Seeking to ${targetTime.toFixed(2)}s`);
                   video.currentTime = targetTime;
                 }
                 
-                setTimeout(() => {
-                  if (data.isPlaying && video.paused) {
-                    video.play().catch(err => {
-                      if (err.name === 'NotAllowedError') {
-                        console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
-                        setAutoplayBlocked(true);
-                        if (isMobileDevice()) {
-                          setShowMobilePlayPrompt(true);
-                          autoplayAttemptedRef.current = true;
-                        }
-                      } else {
-                        console.error('HLS play error:', err);
-                      }
-                    });
-                  } else if (!data.isPlaying && !video.paused) {
-                    video.pause();
+                // Wait for segment to load before playing
+                const waitForSegment = () => {
+                  const actualTime = video.currentTime;
+                  const currentDiff = Math.abs(actualTime - targetTime);
+                  const buffered = isHLSTimeBuffered(hls, targetTime, 2.0); // 2 second tolerance
+                  const hasBuffered = hasHLSBufferedData(hls);
+                  
+                  // If time difference is large, re-seek
+                  if (currentDiff > 2.0) {
+                    console.log(`🔄 HLS time drift detected (${currentDiff.toFixed(2)}s), re-seeking to ${targetTime.toFixed(2)}s`);
+                    video.currentTime = targetTime;
                   }
                   
-                  if (data.playbackSpeed) {
-                    video.playbackRate = data.playbackSpeed;
-                    setPlaybackSpeed(data.playbackSpeed);
+                  // Proceed if: time is close OR readyState is high, AND (buffered OR has any buffered data)
+                  if ((currentDiff <= 1.0 || hls.media.readyState >= 3) && (buffered || hasBuffered || hls.media.readyState >= 2)) {
+                    // Segment loaded and buffered, proceed with play/pause
+                    console.log(`✅ HLS ready: diff=${currentDiff.toFixed(2)}s, buffered=${buffered}, hasBuffered=${hasBuffered}, readyState=${hls.media.readyState}`);
+                    setTimeout(() => {
+                      if (data.isPlaying && video.paused) {
+                        video.play().catch(err => {
+                          if (err.name === 'NotAllowedError') {
+                            console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
+                            if (isMobileDevice()) {
+                              setShowMobilePlayPrompt(true);
+                              autoplayAttemptedRef.current = true;
+                            }
+                          } else {
+                            console.error('HLS play error:', err);
+                          }
+                        });
+                      } else if (!data.isPlaying && !video.paused) {
+                        video.pause();
+                      }
+                      
+                      if (data.playbackSpeed) {
+                        video.playbackRate = data.playbackSpeed;
+                        setPlaybackSpeed(data.playbackSpeed);
+                      }
+                    }, 400); // Reduced delay since we're more lenient
+                  } else {
+                    // Segment not loaded yet, retry
+                    if (retryCount < maxRetries) {
+                      retryCount++;
+                      console.log(`🔄 HLS segment wait retry ${retryCount}/${maxRetries}: diff=${currentDiff.toFixed(2)}s, buffered=${buffered}, hasBuffered=${hasBuffered}, readyState=${hls.media.readyState}`);
+                      setTimeout(waitForSegment, 200); // Reduced retry delay
+                    } else {
+                      // Proceed anyway after max retries if readyState is high enough
+                      console.warn('⚠️ HLS segment loading timeout, proceeding anyway');
+                      if (hls.media.readyState >= 2) {
+                        if (data.isPlaying && video.paused) {
+                          video.play().catch(err => console.error('HLS play error:', err));
+                        } else if (!data.isPlaying && !video.paused) {
+                          video.pause();
+                        }
+                      }
+                    }
                   }
-                }, 200);
+                };
+                
+                // Listen for fragment buffered event (more reliable)
+                const onFragBuffered = () => {
+                  if (isHLSTimeBuffered(hls, targetTime)) {
+                    waitForSegment();
+                    hls.off(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+                  }
+                };
+                hls.once(window.Hls.Events.FRAG_BUFFERED, onFragBuffered);
+                
+                // Also listen for fragment parsed as fallback
+                const onFragParsed = () => {
+                  if (isHLSTimeBuffered(hls, targetTime)) {
+                    waitForSegment();
+                    hls.off(window.Hls.Events.FRAG_PARSED, onFragParsed);
+                  }
+                };
+                hls.once(window.Hls.Events.FRAG_PARSED, onFragParsed);
+                
+                // Start waiting after initial delay (increased for HLS)
+                setTimeout(waitForSegment, 500);
               } else {
                 // Wait for HLS to be ready
-                setTimeout(applyHLSState, 100);
+                if (retryCount < maxRetries) {
+                  retryCount++;
+                  setTimeout(applyHLSState, 200);
+                } else {
+                  console.warn('⚠️ HLS not ready after retries, proceeding anyway');
+                }
               }
             };
             
             // Listen for manifest parsed if not ready
             if (hls.media && hls.media.readyState < 2) {
-              hls.once(window.Hls.Events.MANIFEST_PARSED, applyHLSState);
+              hls.once(window.Hls.Events.MANIFEST_PARSED, () => {
+                console.log('✅ HLS manifest parsed, applying sync state');
+                applyHLSState();
+              });
             }
             applyHLSState();
             return;
@@ -1405,7 +1687,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                   video.play().catch(err => {
                     if (err.name === 'NotAllowedError') {
                       console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
-                      setAutoplayBlocked(true);
                       if (isMobileDevice()) {
                         setShowMobilePlayPrompt(true);
                         autoplayAttemptedRef.current = true;
@@ -1449,7 +1730,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                       video.play().catch(err => {
                         if (err.name === 'NotAllowedError') {
                           console.log('ℹ️ Autoplay blocked on mobile - user interaction required');
-                          setAutoplayBlocked(true);
                           if (isMobileDevice()) {
                             setShowMobilePlayPrompt(true);
                             autoplayAttemptedRef.current = true;
@@ -1500,8 +1780,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     socket.on('video_pause', handleVideoPause);
     socket.on('video_seek', handleVideoSeek);
     socket.on('video_url_change', handleVideoUrlChange);
-    socket.on('video_uploaded', handleVideoUploaded);
-    socket.on('host_video_uploaded', handleVideoUploaded); // Keep for backward compatibility
     socket.on('video_selected', handleVideoSelected);
     socket.on('video_speed_change', handleVideoSpeedChange);
     socket.on('video_sync_state', handleVideoSyncState);
@@ -1518,13 +1796,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       socket.off('video_pause', handleVideoPause);
       socket.off('video_seek', handleVideoSeek);
       socket.off('video_url_change', handleVideoUrlChange);
-      socket.off('video_uploaded', handleVideoUploaded);
-      socket.off('host_video_uploaded', handleVideoUploaded);
       socket.off('video_selected', handleVideoSelected);
       socket.off('video_speed_change', handleVideoSpeedChange);
       socket.off('video_sync_state', handleVideoSyncState);
     };
-  }, [socket, currentUser, isYouTube, roomId, videoUrl, isHLS, showNotification]);
+  }, [socket, currentUser, isYouTube, roomId, videoUrl, isHLS, showNotification, NOTIFICATION_TYPES, isMobileDevice]);
 
   // Periodic sync for YouTube videos to prevent drift
   useEffect(() => {
@@ -1549,12 +1825,16 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         // Only sync if video is playing
         if (playerState === window.YT.PlayerState.PLAYING) {
           // Emit current time to keep others in sync
-          socket.emit('video_play', {
-            roomId,
-            currentTime,
-            initiatedBy: currentUser,
-            isPeriodicSync: true
-          });
+          if (socket && socket.connected) {
+            socket.emit('video_play', {
+              roomId,
+              currentTime,
+              initiatedBy: currentUser,
+              isPeriodicSync: true
+            });
+          } else {
+            console.warn('⚠️ Socket not connected, cannot emit periodic video_play');
+          }
         }
       } catch (error) {
         console.error('Error in periodic YouTube sync:', error);
@@ -1597,17 +1877,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     return 'video/mp4';
   };
   
-  const getSupportedFormats = () => {
-    // Check browser support for different formats
-    const video = document.createElement('video');
-    const formats = {
-      mp4: video.canPlayType('video/mp4; codecs="avc1.42E01E, mp4a.40.2"') !== '',
-      webm: video.canPlayType('video/webm; codecs="vp8, vorbis"') !== '',
-      ogg: video.canPlayType('video/ogg; codecs="theora, vorbis"') !== '',
-      mov: video.canPlayType('video/quicktime') !== ''
-    };
-    return formats;
-  };
 
   // Check if URL is a YouTube URL
   const isYouTubeUrl = (url) => {
@@ -1621,6 +1890,31 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     if (!url) return false;
     const urlLower = url.toLowerCase();
     return urlLower.includes('.m3u8') || urlLower.includes('application/vnd.apple.mpegurl');
+  };
+
+  // Check if URL is a direct video URL (not a web page)
+  const isDirectVideoUrl = (url) => {
+    if (!url) return false;
+    const urlLower = url.toLowerCase();
+    
+    // Direct video file extensions
+    const videoExtensions = ['.mp4', '.webm', '.ogg', '.ogv', '.mov', '.avi', '.mkv', '.m4v', '.flv', '.m3u8'];
+    const hasVideoExtension = videoExtensions.some(ext => urlLower.includes(ext));
+    
+    // Check if it's a YouTube URL (supported)
+    if (isYouTubeUrl(url)) return true;
+    
+    // Check if it's an HLS stream
+    if (isHLSUrl(url)) return true;
+    
+    // If it has a video extension, it's likely a direct video URL
+    if (hasVideoExtension) return true;
+    
+    // Check if URL ends with a video MIME type pattern
+    if (urlLower.includes('video/') || urlLower.includes('application/vnd.apple.mpegurl')) return true;
+    
+    // If none of the above, it's likely a web page URL
+    return false;
   };
 
   // Extract YouTube video ID from URL
@@ -1662,6 +1956,23 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     setPlayerError('');
     
     const url = newVideoUrl.trim();
+    
+    // Validate URL format
+    try {
+      new URL(url);
+    } catch (e) {
+      setPlayerError('Invalid URL format. Please enter a valid URL.');
+      setIsLoading(false);
+      return;
+    }
+    
+    // Check if it's a direct video URL or YouTube URL
+    if (!isYouTubeUrl(url) && !isDirectVideoUrl(url)) {
+      setPlayerError('This appears to be a web page URL, not a direct video URL. Please provide:\n\n• A direct video URL (ending in .mp4, .webm, .m3u8, etc.)\n• A YouTube URL (youtube.com or youtu.be)\n• Or upload a video file directly.');
+      setIsLoading(false);
+      return;
+    }
+    
     let title = extractVideoTitle(url);
     
     // If it's a YouTube URL, extract a better title
@@ -1674,7 +1985,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     
     setVideoUrl(url);
     setVideoTitle(title);
-    setCurrentVideoFile(null);
     
     if (socket && roomId) {
       socket.emit('video_url_change', {
@@ -1688,112 +1998,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     setIsLoading(false);
   };
 
-  const handleFileUpload = async (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    if (!file.type.startsWith('video/')) {
-      alert('Please select a video file (MP4, WebM, MOV, AVI, MKV, etc.)');
-      return;
-    }
-
-    const maxSize = 1024 * 1024 * 1024; // 1GB limit
-    if (file.size > maxSize) {
-      alert('File is too large. Please select a video smaller than 1GB.');
-      return;
-    }
-
-    // Check format support and warn if needed
-    const formats = getSupportedFormats();
-    const fileName = file.name.toLowerCase();
-    
-    let formatWarning = '';
-    if (fileName.includes('.mp4') || fileName.includes('.m4v')) {
-      if (!formats.mp4) {
-        formatWarning = '⚠️ MP4 format may not be fully supported in this browser. Consider using WebM or OGG.';
-      }
-    } else if (fileName.includes('.webm')) {
-      if (!formats.webm) {
-        formatWarning = '⚠️ WebM format may not be fully supported in this browser. Consider using MP4 for best compatibility.';
-      }
-    } else if (fileName.includes('.mov')) {
-      if (!formats.mov) {
-        formatWarning = '⚠️ MOV format has limited browser support. Consider converting to MP4 for best compatibility.';
-      }
-    } else if (fileName.includes('.avi') || fileName.includes('.mkv')) {
-      formatWarning = '⚠️ AVI/MKV formats have limited HTML5 support. The video may not play in all browsers. Consider converting to MP4 for best compatibility.';
-    }
-    
-    if (formatWarning) {
-      const proceed = window.confirm(`${formatWarning}\n\nDo you want to continue uploading anyway?`);
-      if (!proceed) {
-        if (fileInputRef.current) {
-          fileInputRef.current.value = '';
-        }
-        return;
-      }
-    }
-
-    // Upload to server - one user uploads, everyone can stream
-    await uploadVideoToServer(file);
-    
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
-
-  const uploadVideoToServer = async (file) => {
-    setIsUploading(true);
-    setUploadProgress(0);
-    setPlayerError('');
-    
-    try {
-      const formData = new FormData();
-      formData.append('video', file);
-      formData.append('userId', currentUser);
-      
-      const xhr = new XMLHttpRequest();
-      
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable) {
-          const progress = Math.round((e.loaded / e.total) * 100);
-          setUploadProgress(progress);
-        }
-      });
-      
-      xhr.addEventListener('load', () => {
-        if (xhr.status === 200) {
-          const response = JSON.parse(xhr.responseText);
-          console.log('Video uploaded successfully:', response);
-          
-          // Video will be automatically loaded via socket event
-          setHostVideo(response.video);
-          setPlayerError('');
-        } else {
-          const error = JSON.parse(xhr.responseText);
-          setPlayerError(`Upload failed: ${error.message}`);
-        }
-        setIsUploading(false);
-        setUploadProgress(0);
-      });
-      
-      xhr.addEventListener('error', () => {
-        setPlayerError('Upload failed: Network error');
-        setIsUploading(false);
-        setUploadProgress(0);
-      });
-      
-      const apiUrl = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
-      xhr.open('POST', `${apiUrl}/api/rooms/${roomId}/upload-video`);
-      xhr.send(formData);
-      
-    } catch (error) {
-      console.error('Upload error:', error);
-      setPlayerError('Upload failed: ' + error.message);
-      setIsUploading(false);
-      setUploadProgress(0);
-    }
-  };
 
   const extractVideoTitle = (url) => {
     try {
@@ -1829,95 +2033,21 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     console.log('🔄 Force syncing:', { currentTime, isPlaying });
     
     if (isPlaying) {
-      socket.emit('video_play', { roomId, currentTime });
-    } else {
-      socket.emit('video_pause', { roomId, currentTime });
-    }
-  };
-
-  const selectVideoFromLibrary = async (video) => {
-    // Any user can select videos from the library
-    if (!video || !video.url) {
-      setPlayerError('Invalid video data');
-      console.error('Invalid video object:', video);
-      return;
-    }
-    
-    console.log('Selecting video from library:', { title: video.title, url: video.url });
-    
-    try {
-      const apiUrl = process.env.REACT_APP_SERVER_URL || 'http://localhost:5000';
-      const response = await fetch(`${apiUrl}/api/rooms/${roomId}/select-video`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          videoUrl: video.url,
-          userId: currentUser
-        })
-      });
-      
-      if (response.ok) {
-        // Video will be loaded via socket event
-        console.log('Video selected successfully:', video.title);
-        setPlayerError('');
+      if (socket && socket.connected) {
+        socket.emit('video_play', { roomId, currentTime });
       } else {
-        const error = await response.json();
-        console.error('Selection error:', error);
-        setPlayerError(`Failed to select video: ${error.message}`);
-        
-        // Show debug info if available
-        if (error.debug) {
-          console.error('Debug info:', error.debug);
-          console.error('Available videos in library:', videoLibrary.map(v => ({ title: v.title, url: v.url })));
-        }
+        console.warn('⚠️ Socket not connected, cannot emit video_play');
       }
-    } catch (error) {
-      console.error('Error selecting video:', error);
-      setPlayerError('Failed to select video: Network error');
+    } else {
+      if (socket && socket.connected) {
+        socket.emit('video_pause', { roomId, currentTime });
+      } else {
+        console.warn('⚠️ Socket not connected, cannot emit video_pause');
+      }
     }
   };
 
-  const sampleVideos = [
-    {
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4',
-      title: 'Big Buck Bunny'
-    },
-    {
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4',
-      title: 'Elephants Dream'
-    },
-    {
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4',
-      title: 'For Bigger Blazes'
-    },
-    {
-      url: 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4',
-      title: 'Sintel'
-    }
-  ];
 
-  const loadSampleVideo = (sample) => {
-    setPlayerError('');
-    resetSync();
-    
-    if (videoUrl.startsWith('blob:')) {
-      URL.revokeObjectURL(videoUrl);
-    }
-    
-    setVideoUrl(sample.url);
-    setVideoTitle(sample.title);
-    setCurrentVideoFile(null);
-    
-    if (socket && roomId) {
-      socket.emit('video_url_change', {
-        roomId,
-        videoUrl: sample.url,
-        videoTitle: sample.title
-      });
-    }
-  };
 
   // Apply playback speed to video
   useEffect(() => {
@@ -2040,7 +2170,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       
       // Emit seek event
       if (socket && roomId && !syncInProgress.current) {
-        socket.emit('video_seek', { roomId, currentTime: newTime, initiatedBy: currentUser });
+        if (socket && socket.connected) {
+          socket.emit('video_seek', { roomId, currentTime: newTime, initiatedBy: currentUser });
+        } else {
+          console.warn('⚠️ Socket not connected, cannot emit video_seek');
+        }
       }
     }
     
@@ -2064,15 +2198,16 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       if (showSpeedDropdown && !event.target.closest('[data-speed-control]')) {
         setShowSpeedDropdown(false);
       }
+      if (showSyncMenu && !event.target.closest('[data-sync-control]')) {
+        setShowSyncMenu(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showSpeedDropdown]);
+  }, [showSpeedDropdown, showSyncMenu]);
 
   return (
     <div className="component-card" style={{ marginBottom: 0 }}>
-      <h3 style={{ marginBottom: '20px', fontSize: '22px', fontWeight: '800' }}>🎬 Video Player - Everyone Can Control!</h3>
-      
       {/* Player Status */}
       <div style={{ marginBottom: '20px' }}>
         <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginBottom: '15px', flexWrap: 'wrap' }}>
@@ -2089,70 +2224,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               🔄 Syncing...
             </span>
           )}
-          
-          <button 
-            onClick={resetSync}
-            style={{
-              padding: '8px 16px',
-              fontSize: '14px',
-              background: '#6f42c1',
-              minHeight: '44px',
-              minWidth: '60px',
-              touchAction: 'manipulation'
-            }}
-            className="touch-friendly"
-          >
-            🔄 Reset Sync
-          </button>
-
-          <button 
-            onClick={forceSync}
-            style={{
-              padding: '8px 16px',
-              fontSize: '14px',
-              background: '#fd7e14',
-              minHeight: '44px',
-              minWidth: '60px',
-              touchAction: 'manipulation'
-            }}
-            className="touch-friendly"
-          >
-            ⚡ Force Sync
-          </button>
-
-          <button 
-            onClick={() => {
-              if (videoRef.current) {
-                console.log('🎬 Manual play test');
-                videoRef.current.play().catch(err => {
-                  if (err.name !== 'AbortError') {
-                    console.error('Manual play failed:', err);
-                  }
-                });
-              }
-            }}
-            style={{
-              padding: '8px 16px',
-              fontSize: '14px',
-              background: '#20c997',
-              minHeight: '44px',
-              minWidth: '60px',
-              touchAction: 'manipulation'
-            }}
-            className="touch-friendly"
-          >
-            ▶️ Manual Play
-          </button>
-
-          <span style={{ 
-            padding: '4px 8px', 
-            borderRadius: '4px', 
-            fontSize: '11px',
-            background: '#333',
-            color: '#ccc'
-          }}>
-            ID: {currentUser?.substring(0, 8)}
-          </span>
         </div>
         
         {playerError && (
@@ -2175,17 +2246,17 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         borderRadius: '16px',
         overflow: 'hidden',
         marginBottom: '24px',
-        border: '3px solid #28a745',
+        border: '3px solid var(--accent-color)',
         position: 'relative',
-        boxShadow: '0 8px 24px rgba(40, 167, 69, 0.3)',
+        boxShadow: '0 8px 24px rgba(99, 102, 241, 0.3)',
         transition: 'all 0.3s ease',
         touchAction: 'pan-y pinch-zoom'
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.boxShadow = '0 12px 32px rgba(40, 167, 69, 0.4)';
+        e.currentTarget.style.boxShadow = '0 12px 32px rgba(99, 102, 241, 0.4)';
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.boxShadow = '0 8px 24px rgba(40, 167, 69, 0.3)';
+        e.currentTarget.style.boxShadow = '0 8px 24px rgba(99, 102, 241, 0.3)';
       }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
@@ -2257,16 +2328,16 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           </div>
         ) : (
         <div style={{ position: 'relative', width: '100%' }}>
-          <video
-            ref={videoRef}
-            controls
+        <video
+          ref={videoRef}
+          controls
             controlsList="nodownload"
             playsInline
             muted={false}
-            style={{
-              width: '100%',
-              height: 'auto',
-              minHeight: '300px',
+          style={{
+            width: '100%',
+            height: 'auto',
+            minHeight: '300px',
               display: 'block',
               touchAction: 'pan-y pinch-zoom',
               // Ensure controls are always visible on mobile
@@ -2274,10 +2345,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               appearance: 'none',
               // For Chrome/Brave, ensure video is interactive
               pointerEvents: 'auto'
-            }}
-            preload="metadata"
+          }}
+          preload="metadata"
             onPlay={() => {
-              setAutoplayBlocked(false);
               setShowMobilePlayPrompt(false);
               setVideoPaused(false);
             }}
@@ -2324,7 +2394,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 const playPromise = videoRef.current.play();
                 if (playPromise !== undefined) {
                   playPromise.then(() => {
-                    setAutoplayBlocked(false);
                     setShowMobilePlayPrompt(false);
                     setVideoPaused(false);
                     
@@ -2340,7 +2409,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                       // Chrome/Brave blocked autoplay - show prompt
                       if (isMobileDevice() && isChromeOrBrave()) {
                         setShowMobilePlayPrompt(true);
-                        setAutoplayBlocked(true);
                       }
                     }
                   });
@@ -2354,10 +2422,10 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 // Don't prevent default - let it bubble to video controls
               }
             }}
-          >
-            <source src={videoUrl} type={getVideoType(videoUrl)} />
-            Your browser does not support the video tag.
-          </video>
+        >
+          <source src={videoUrl} type={getVideoType(videoUrl)} />
+          Your browser does not support the video tag.
+        </video>
           
           {/* Mobile Play Prompt Overlay - Show when video is paused on mobile */}
           {/* Always show for Chrome/Brave on mobile when paused */}
@@ -2384,7 +2452,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                     if (playPromise !== undefined) {
                       playPromise.then(() => {
                         setShowMobilePlayPrompt(false);
-                        setAutoplayBlocked(false);
                         setVideoPaused(false);
                         
                         // After play starts, wait a moment then sync to room state
@@ -2422,7 +2489,6 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                   if (playPromise !== undefined) {
                     playPromise.then(() => {
                       setShowMobilePlayPrompt(false);
-                      setAutoplayBlocked(false);
                       setVideoPaused(false);
                       
                       // After play starts, wait a moment then sync to room state
@@ -2555,9 +2621,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             top: '100%',
             left: 0,
             marginTop: '6px',
-            background: 'var(--bg-secondary)',
+        background: 'var(--bg-secondary)', 
             border: '1px solid var(--border-color)',
-            borderRadius: '8px',
+        borderRadius: '8px',
             padding: '6px',
             zIndex: 1000,
             boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
@@ -2576,12 +2642,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 style={{
                   padding: '8px 10px',
                   borderRadius: '6px',
-                  border: playbackSpeed === speed ? '2px solid #28a745' : '1px solid var(--border-color)',
+                  border: playbackSpeed === speed ? '2px solid var(--accent-color)' : '1px solid var(--border-color)',
                   cursor: 'pointer',
                   fontSize: '12px',
                   fontWeight: playbackSpeed === speed ? 'bold' : 'normal',
                   background: playbackSpeed === speed 
-                    ? 'linear-gradient(135deg, #28a745, #20c997)' 
+                    ? 'var(--accent-color)' 
                     : 'var(--bg-tertiary)',
                   color: playbackSpeed === speed ? '#fff' : 'var(--text-primary)',
                   transition: 'all 0.2s ease',
@@ -2608,12 +2674,166 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             ))}
           </div>
         )}
+      </div>
+
+        {/* Sync Controls Button */}
+        <div data-sync-control style={{ 
+          display: 'inline-block',
+          position: 'relative'
+        }}>
+          <button
+            onClick={() => setShowSyncMenu(!showSyncMenu)}
+            className="touch-friendly"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '8px 14px',
+              borderRadius: '8px',
+              border: '1px solid var(--border-color)',
+              background: 'var(--bg-tertiary)',
+              color: 'var(--text-primary)',
+              cursor: 'pointer',
+              fontSize: '13px',
+              fontWeight: '600',
+              transition: 'all 0.2s ease',
+              minHeight: '36px',
+              touchAction: 'manipulation'
+            }}
+            onMouseEnter={(e) => {
+              e.target.style.background = 'var(--bg-secondary)';
+              e.target.style.borderColor = 'var(--accent-color)';
+            }}
+            onMouseLeave={(e) => {
+              e.target.style.background = 'var(--bg-tertiary)';
+              e.target.style.borderColor = 'var(--border-color)';
+            }}
+          >
+            <span style={{ fontSize: '14px' }}>⚙️</span>
+            <span>Sync</span>
+            <span style={{ fontSize: '10px', opacity: 0.7 }}>{showSyncMenu ? '▲' : '▼'}</span>
+          </button>
+
+          {showSyncMenu && (
+            <div style={{
+              position: 'absolute',
+              top: '100%',
+              left: 0,
+              marginTop: '6px',
+              background: 'var(--bg-secondary)',
+              border: '1px solid var(--border-color)',
+              borderRadius: '8px',
+              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+              zIndex: 1000,
+              minWidth: '180px',
+              overflow: 'hidden'
+            }}>
+              <button
+                onClick={() => {
+                  resetSync();
+                  setShowSyncMenu(false);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  fontSize: '14px',
+                  background: 'transparent',
+                  color: 'var(--text-primary)',
+                  border: 'none',
+                  borderBottom: '1px solid var(--border-color)',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  transition: 'background 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.background = 'var(--bg-tertiary)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.background = 'transparent';
+                }}
+              >
+                <span>🔄</span>
+                <span>Reset Sync</span>
+              </button>
+              
+              <button
+                onClick={() => {
+                  forceSync();
+                  setShowSyncMenu(false);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  fontSize: '14px',
+                  background: 'transparent',
+                  color: 'var(--text-primary)',
+                  border: 'none',
+                  borderBottom: '1px solid var(--border-color)',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  transition: 'background 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.background = 'var(--bg-tertiary)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.background = 'transparent';
+                }}
+              >
+                <span>⚡</span>
+                <span>Force Sync</span>
+              </button>
+              
+              <button
+                onClick={() => {
+                  if (videoRef.current) {
+                    console.log('🎬 Manual play test');
+                    videoRef.current.play().catch(err => {
+                      if (err.name !== 'AbortError') {
+                        console.error('Manual play failed:', err);
+                      }
+                    });
+                  }
+                  setShowSyncMenu(false);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  fontSize: '14px',
+                  background: 'transparent',
+                  color: 'var(--text-primary)',
+                  border: 'none',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  transition: 'background 0.2s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.background = 'var(--bg-tertiary)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.background = 'transparent';
+                }}
+              >
+                <span>▶️</span>
+                <span>Manual Play</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Load URL Button */}
         <div style={{ 
-          display: 'flex',
-          alignItems: 'center',
+          display: 'flex', 
+          alignItems: 'center', 
           gap: '8px',
           flex: 1,
           minWidth: '200px'
@@ -2685,42 +2905,42 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       </div>
 
       {/* YouTube URL Warning */}
-      {isYouTubeUrl(newVideoUrl) && (
-        <div style={{
+        {isYouTubeUrl(newVideoUrl) && (
+          <div style={{
           marginTop: '-10px',
           marginBottom: '15px',
           padding: '8px 12px',
-          background: 'linear-gradient(135deg, rgba(255, 0, 0, 0.15), rgba(204, 0, 0, 0.1))',
-          border: '1px solid rgba(255, 0, 0, 0.3)',
-          borderRadius: '8px',
-          fontSize: '13px',
-          color: 'var(--text-primary)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px'
-        }}>
-          <span>📺</span>
-          <span>YouTube video detected - will load in player</span>
-        </div>
-      )}
-      {newVideoUrl.trim() && !isYouTubeUrl(newVideoUrl) && !newVideoUrl.startsWith('http') && (
-        <div style={{
+            background: 'linear-gradient(135deg, rgba(255, 0, 0, 0.15), rgba(204, 0, 0, 0.1))',
+            border: '1px solid rgba(255, 0, 0, 0.3)',
+            borderRadius: '8px',
+            fontSize: '13px',
+            color: 'var(--text-primary)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <span>📺</span>
+            <span>YouTube video detected - will load in player</span>
+          </div>
+        )}
+        {newVideoUrl.trim() && !isYouTubeUrl(newVideoUrl) && !newVideoUrl.startsWith('http') && (
+          <div style={{
           marginTop: '-10px',
           marginBottom: '15px',
           padding: '8px 12px',
-          background: 'linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(255, 152, 0, 0.1))',
-          border: '1px solid rgba(255, 193, 7, 0.3)',
-          borderRadius: '8px',
-          fontSize: '13px',
-          color: 'var(--text-primary)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '8px'
-        }}>
-          <span>⚠️</span>
-          <span>Please enter a valid URL (e.g., https://example.com/video.mp4)</span>
-        </div>
-      )}
+            background: 'linear-gradient(135deg, rgba(255, 193, 7, 0.15), rgba(255, 152, 0, 0.1))',
+            border: '1px solid rgba(255, 193, 7, 0.3)',
+            borderRadius: '8px',
+            fontSize: '13px',
+            color: 'var(--text-primary)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px'
+          }}>
+            <span>⚠️</span>
+            <span>Please enter a valid URL (e.g., https://example.com/video.mp4)</span>
+          </div>
+        )}
 
       <div style={{ 
         background: 'var(--bg-secondary)', 
@@ -2744,479 +2964,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
               {videoTitle}
             </span>
           </div>
-          {currentVideoFile && (
-            <div style={{ 
-              fontSize: '12px', 
-              color: 'var(--text-muted)', 
-              marginTop: '8px',
-              padding: '6px 10px',
-              background: 'var(--bg-tertiary)',
-              borderRadius: '4px',
-              display: 'inline-block'
-            }}>
-              📁 Local file: {(currentVideoFile.size / (1024 * 1024)).toFixed(1)} MB
-            </div>
-          )}
         </div>
-        
-        {/* Video Upload - Anyone Can Upload */}
-        <div style={{ 
-            marginBottom: '16px', 
-            padding: '14px', 
-            background: 'linear-gradient(135deg, rgba(40, 167, 69, 0.1), rgba(32, 201, 151, 0.05))',
-            borderRadius: '12px', 
-            border: '1px solid #28a745',
-            boxShadow: '0 2px 8px rgba(40, 167, 69, 0.15)',
-            position: 'relative',
-            overflow: 'hidden'
-          }}>
-            <div style={{
-              position: 'absolute',
-              top: '-20px',
-              right: '-20px',
-              width: '80px',
-              height: '80px',
-              background: 'radial-gradient(circle, rgba(40, 167, 69, 0.1) 0%, transparent 70%)',
-              borderRadius: '50%'
-            }}></div>
-            <h4 style={{ 
-              color: '#28a745', 
-              marginBottom: '10px',
-              fontSize: '15px',
-              fontWeight: '700',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '6px',
-              position: 'relative',
-              zIndex: 1
-            }}>
-              <span style={{ fontSize: '18px' }}>📁</span> Upload Video
-            </h4>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="video/*"
-            onChange={handleFileUpload}
-            style={{ display: 'none' }}
-              disabled={isUploading}
-          />
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="btn-success touch-friendly"
-              style={{ 
-                marginBottom: '10px',
-                padding: '10px 16px',
-                fontSize: '14px',
-                fontWeight: '600',
-                width: '100%',
-                position: 'relative',
-                zIndex: 1,
-                minHeight: '40px',
-                touchAction: 'manipulation'
-              }}
-              disabled={isUploading || isLoading}
-            >
-              {isUploading ? '⏳ Uploading...' : '📁 Upload Video'}
-          </button>
-            
-            {isUploading && (
-              <div style={{ marginTop: '10px', position: 'relative', zIndex: 1 }}>
-                <div style={{ 
-                  background: 'var(--bg-tertiary)', 
-                  borderRadius: '12px', 
-                  overflow: 'hidden',
-                  height: '24px',
-                  marginBottom: '8px',
-                  boxShadow: 'inset 0 2px 4px rgba(0, 0, 0, 0.2)'
-                }}>
-                  <div style={{
-                    background: 'linear-gradient(135deg, #28a745, #20c997)',
-                    height: '100%',
-                    width: `${uploadProgress}%`,
-                    transition: 'width 0.3s ease',
-                    boxShadow: '0 2px 8px rgba(40, 167, 69, 0.4)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'flex-end',
-                    paddingRight: '8px',
-                    color: 'white',
-                    fontSize: '11px',
-                    fontWeight: '600'
-                  }}>
-                    {uploadProgress > 10 && `${uploadProgress}%`}
-                  </div>
-                </div>
-                <div style={{ 
-                  display: 'flex', 
-                  justifyContent: 'space-between',
-                  alignItems: 'center'
-                }}>
-                  <span style={{ 
-                    fontSize: '13px', 
-                    color: 'var(--text-secondary)',
-                    fontWeight: '500'
-                  }}>
-                    Uploading: <strong style={{ color: '#28a745' }}>{uploadProgress}%</strong>
-                  </span>
-                  <span style={{ 
-                    fontSize: '12px', 
-                    color: 'var(--text-muted)'
-                  }}>
-                    Please wait...
-          </span>
-        </div>
-              </div>
-            )}
-            
-            <div style={{ 
-              fontSize: '12px', 
-              color: 'var(--text-secondary)', 
-              marginTop: '8px',
-              padding: '8px',
-              background: 'var(--bg-tertiary)',
-              borderRadius: '6px',
-              textAlign: 'center',
-              position: 'relative',
-              zIndex: 1
-            }}>
-              💡 Anyone can upload - everyone gets access automatically! (max 1GB)
-              <br />
-              <span style={{ fontSize: '11px', opacity: 0.8 }}>
-                Supported: MP4 (best), WebM, OGG, MOV, AVI, MKV
-              </span>
-            </div>
-            
-            {hostVideo && (
-              <div style={{ 
-                marginTop: '10px', 
-                padding: '10px', 
-                background: 'linear-gradient(135deg, rgba(40, 167, 69, 0.15), rgba(32, 201, 151, 0.1))',
-                borderRadius: '8px',
-                border: '1px solid rgba(40, 167, 69, 0.3)',
-                position: 'relative',
-                zIndex: 1
-              }}>
-                <div style={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  gap: '6px',
-                  marginBottom: '6px'
-                }}>
-                  <span style={{ fontSize: '16px' }}>✅</span>
-                  <strong style={{ color: '#28a745', fontSize: '13px' }}>
-                    Uploaded: {hostVideo.title}
-                  </strong>
-                </div>
-                <div style={{ 
-                  fontSize: '12px', 
-                  color: 'var(--text-secondary)',
-                  display: 'flex',
-                  gap: '12px',
-                  flexWrap: 'wrap'
-                }}>
-                  <span>📦 Size: <strong>{(hostVideo.size / (1024 * 1024)).toFixed(1)} MB</strong></span>
-                  {hostVideo.format && (
-                    <span>🎬 Format: <strong>{hostVideo.format.toUpperCase()}</strong></span>
-                  )}
-                </div>
-              </div>
-            )}
-            
-            {/* Video Library */}
-            {videoLibrary.length > 0 && (
-              <div style={{ 
-                marginTop: '20px', 
-                padding: '18px', 
-                background: 'var(--bg-secondary)',
-                borderRadius: '12px',
-                border: '1px solid var(--border-color)',
-                boxShadow: 'var(--shadow-sm)',
-                position: 'relative',
-                zIndex: 1
-              }}>
-                <div style={{ 
-                  display: 'flex', 
-                  justifyContent: 'space-between', 
-                  alignItems: 'center', 
-                  marginBottom: '12px' 
-                }}>
-                  <strong style={{ 
-                    color: '#28a745',
-                    fontSize: '16px',
-                    fontWeight: '700',
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '8px'
-                  }}>
-                    <span style={{ fontSize: '20px' }}>📚</span> Video Library ({videoLibrary.length})
-                  </strong>
-                  <button
-                    onClick={() => setShowLibrary(!showLibrary)}
-                    className="btn-success touch-friendly"
-                    style={{
-                      padding: '10px 18px',
-                      fontSize: '14px',
-                      fontWeight: '600',
-                      borderRadius: '8px',
-                      minHeight: '44px',
-                      touchAction: 'manipulation'
-                    }}
-                  >
-                    {showLibrary ? '▼ Hide' : '▶ Show'}
-                  </button>
-                </div>
-                
-                {showLibrary && (
-                  <div style={{ 
-                    maxHeight: '300px', 
-                    overflowY: 'auto', 
-                    marginTop: '12px',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '10px'
-                  }}>
-                    {videoLibrary.map((video, index) => (
-                      <div
-                        key={index}
-                        onClick={() => selectVideoFromLibrary(video)}
-                        style={{
-                          padding: '14px 16px',
-                          background: videoUrl === video.url 
-                            ? 'linear-gradient(135deg, rgba(40, 167, 69, 0.2), rgba(32, 201, 151, 0.15))' 
-                            : 'var(--bg-tertiary)',
-                          borderRadius: '12px',
-                          cursor: 'pointer',
-                          border: videoUrl === video.url 
-                            ? '2px solid #28a745' 
-                            : '1px solid var(--border-color)',
-                          transition: 'all 0.3s ease',
-                          boxShadow: videoUrl === video.url 
-                            ? '0 4px 12px rgba(40, 167, 69, 0.3)' 
-                            : 'var(--shadow-sm)',
-                          position: 'relative'
-                        }}
-                        onMouseEnter={(e) => {
-                          if (videoUrl !== video.url) {
-                            e.currentTarget.style.background = 'var(--bg-secondary)';
-                            e.currentTarget.style.transform = 'translateX(4px)';
-                            e.currentTarget.style.boxShadow = 'var(--shadow-md)';
-                            e.currentTarget.style.borderColor = '#28a745';
-                          }
-                        }}
-                        onMouseLeave={(e) => {
-                          if (videoUrl !== video.url) {
-                            e.currentTarget.style.background = 'var(--bg-tertiary)';
-                            e.currentTarget.style.transform = 'translateX(0)';
-                            e.currentTarget.style.boxShadow = 'var(--shadow-sm)';
-                            e.currentTarget.style.borderColor = 'var(--border-color)';
-                          }
-                        }}
-                      >
-                        <div style={{ 
-                          display: 'flex', 
-                          justifyContent: 'space-between', 
-                          alignItems: 'center',
-                          gap: '12px'
-                        }}>
-                          <div style={{ flex: 1 }}>
-                            <div style={{ 
-                              display: 'flex', 
-                              alignItems: 'center', 
-                              gap: '8px',
-                              marginBottom: '6px'
-                            }}>
-                              {videoUrl === video.url && (
-                                <span style={{ 
-                                  fontSize: '16px',
-                                  color: '#28a745',
-                                  animation: 'pulse 2s infinite'
-                                }}>▶</span>
-                              )}
-                              <strong style={{ 
-                                fontSize: '14px',
-                                color: videoUrl === video.url ? '#28a745' : 'var(--text-primary)',
-                                fontWeight: '700'
-                              }}>
-                                {video.title}
-                              </strong>
-                            </div>
-                            <div style={{ 
-                              fontSize: '12px', 
-                              color: 'var(--text-secondary)',
-                              display: 'flex',
-                              gap: '10px',
-                              flexWrap: 'wrap',
-                              alignItems: 'center'
-                            }}>
-                              <span style={{
-                                padding: '2px 8px',
-                                background: 'var(--bg-tertiary)',
-                                borderRadius: '6px',
-                                fontWeight: '500'
-                              }}>
-                                📦 {(video.size / (1024 * 1024)).toFixed(1)} MB
-                              </span>
-                              {video.format && (
-                                <span style={{
-                                  padding: '2px 8px',
-                                  background: 'var(--bg-tertiary)',
-                                  borderRadius: '6px',
-                                  fontWeight: '500'
-                                }}>
-                                  🎬 {video.format.toUpperCase()}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          {videoUrl === video.url && (
-                            <span style={{ 
-                              fontSize: '12px', 
-                              color: 'white',
-                              background: 'linear-gradient(135deg, #28a745, #20c997)',
-                              padding: '6px 12px',
-                              borderRadius: '8px',
-                              fontWeight: '700',
-                              boxShadow: '0 2px 8px rgba(40, 167, 69, 0.4)',
-                              whiteSpace: 'nowrap'
-                            }}>
-                              Now Playing
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-        {/* Current Video Info - Show for all users */}
-        {hostVideo && (
-          <div style={{ 
-            marginBottom: '20px', 
-            padding: '20px', 
-            background: 'linear-gradient(135deg, rgba(0, 123, 255, 0.1), rgba(23, 162, 184, 0.05))',
-            borderRadius: '16px', 
-            border: '2px solid #007bff',
-            boxShadow: '0 4px 12px rgba(0, 123, 255, 0.2)',
-            position: 'relative',
-            overflow: 'hidden'
-          }}>
-            <div style={{
-              position: 'absolute',
-              top: '-30px',
-              right: '-30px',
-              width: '120px',
-              height: '120px',
-              background: 'radial-gradient(circle, rgba(0, 123, 255, 0.1) 0%, transparent 70%)',
-              borderRadius: '50%'
-            }}></div>
-            <h4 style={{ 
-              color: '#007bff', 
-              marginBottom: '12px',
-              fontSize: '18px',
-              fontWeight: '700',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              position: 'relative',
-              zIndex: 1
-            }}>
-              <span style={{ fontSize: '24px' }}>🎬</span> Current Video
-            </h4>
-            <div style={{ 
-              marginTop: '15px', 
-              padding: '14px', 
-              background: 'linear-gradient(135deg, rgba(0, 123, 255, 0.15), rgba(23, 162, 184, 0.1))',
-              borderRadius: '12px',
-              border: '1px solid rgba(0, 123, 255, 0.3)',
-              position: 'relative',
-              zIndex: 1
-            }}>
-              <div style={{ 
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: '8px',
-                marginBottom: '8px'
-              }}>
-                <span style={{ fontSize: '20px' }}>✅</span>
-                <strong style={{ color: '#007bff', fontSize: '15px' }}>
-                  {hostVideo.title}
-                </strong>
-              </div>
-              <div style={{ 
-                fontSize: '12px', 
-                color: 'var(--text-secondary)',
-                display: 'flex',
-                gap: '12px',
-                flexWrap: 'wrap'
-              }}>
-                <span>📦 Size: <strong>{(hostVideo.size / (1024 * 1024)).toFixed(1)} MB</strong></span>
-                {hostVideo.format && (
-                  <span>🎬 Format: <strong>{hostVideo.format.toUpperCase()}</strong></span>
-                )}
-                {hostVideo.uploadedBy && (
-                  <span>👤 Uploaded by: <strong>{hostVideo.uploadedBy}</strong></span>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
         
 
-        {/* Sample Videos */}
-        <div style={{ marginBottom: '15px' }}>
-          <strong>🎯 Sample Videos:</strong>
-          <div style={{ display: 'flex', gap: '10px', marginTop: '8px', flexWrap: 'wrap' }}>
-            {sampleVideos.map((sample, index) => (
-              <button
-                key={index}
-                onClick={() => loadSampleVideo(sample)}
-                style={{
-                  background: videoUrl === sample.url ? '#28a745' : '#6c757d',
-                  padding: '8px 12px',
-                  fontSize: '12px',
-                  borderRadius: '4px',
-                  border: 'none',
-                  color: 'white',
-                  cursor: 'pointer'
-                }}
-              >
-                {sample.title}
-              </button>
-            ))}
-          </div>
-        </div>
-        
-        <div style={{ 
-          fontSize: '12px', 
-          color: '#ccc',
-          lineHeight: '1.4'
-        }}>
-          💡 <strong>Playback Control:</strong> 
-          <ul style={{ margin: '5px 0', paddingLeft: '20px' }}>
-            <li><strong>🎮 Anyone Can Control:</strong> Any user can play, pause, or seek - changes sync to everyone!</li>
-            <li><strong>🔄 Auto-Sync:</strong> All playback actions are synchronized across all users</li>
-            <li><strong>⏸️ Browser Auto-play:</strong> Browsers block auto-play - click the play button to start</li>
-            <li><strong>🛡️ Sync Protection:</strong> Prevents sync loops with debouncing and progress flags</li>
-            <li><strong>⚡ Force Sync:</strong> Manual sync trigger if videos get out of sync</li>
-          </ul>
-          
-          <div style={{ marginTop: '10px', padding: '8px', background: '#007bff', borderRadius: '4px' }}>
-            <strong>🎮 Tip:</strong> Click the play button on the video player to start watching. Anyone in the room can control playback!
-          </div>
-          <div style={{ 
-            marginTop: '10px', 
-            padding: '10px', 
-            background: 'linear-gradient(135deg, #28a745, #20c997)', 
-            borderRadius: '8px',
-            fontSize: '13px',
-            display: window.innerWidth <= 768 ? 'block' : 'none'
-          }}>
-            <strong>📱 Mobile Controls:</strong> Swipe left/right on the video to seek, swipe up/down to adjust volume!
-          </div>
-        </div>
       </div>
     </div>
   );
