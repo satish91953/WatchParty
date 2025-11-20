@@ -230,11 +230,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                   // Use requestAnimationFrame for immediate emission
                   requestAnimationFrame(() => {
                     if (socket && socket.connected) {
-                      socket.emit('video_play', {
-                        roomId,
-                        currentTime,
-                        initiatedBy: currentUser
-                      });
+                    socket.emit('video_play', {
+                      roomId,
+                      currentTime,
+                      initiatedBy: currentUser
+                    });
                     } else {
                       console.warn('⚠️ Socket not connected, cannot emit video_play');
                     }
@@ -247,11 +247,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                   // Use requestAnimationFrame for immediate emission
                   requestAnimationFrame(() => {
                     if (socket && socket.connected) {
-                      socket.emit('video_pause', {
-                        roomId,
-                        currentTime,
-                        initiatedBy: currentUser
-                      });
+                    socket.emit('video_pause', {
+                      roomId,
+                      currentTime,
+                      initiatedBy: currentUser
+                    });
                     } else {
                       console.warn('⚠️ Socket not connected, cannot emit video_pause');
                     }
@@ -437,13 +437,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         const eventId = ++lastEventIdRef.current;
         console.log(`🎬 User control: Emitting play at time: ${currentTime} (eventId: ${eventId})`);
         if (socket && socket.connected) {
-          socket.emit('video_play', { 
-            roomId, 
-            currentTime, 
-            initiatedBy: currentUser,
-            eventId,
-            timestamp: now
-          });
+        socket.emit('video_play', { 
+          roomId, 
+          currentTime, 
+          initiatedBy: currentUser,
+          eventId,
+          timestamp: now
+        });
         } else {
           console.warn('⚠️ Socket not connected, cannot emit video_play');
         }
@@ -471,13 +471,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         const eventId = ++lastEventIdRef.current;
         console.log(`⏸️ User control: Emitting pause at time: ${currentTime} (eventId: ${eventId})`);
         if (socket && socket.connected) {
-          socket.emit('video_pause', { 
-            roomId, 
-            currentTime, 
-            initiatedBy: currentUser,
-            eventId,
-            timestamp: now
-          });
+        socket.emit('video_pause', { 
+          roomId, 
+          currentTime, 
+          initiatedBy: currentUser,
+          eventId,
+          timestamp: now
+        });
         } else {
           console.warn('⚠️ Socket not connected, cannot emit video_pause');
         }
@@ -524,13 +524,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
             if (buffered && timeDiff <= 0.5) {
               console.log(`⏭️ HLS seek verified, emitting seek to time: ${currentTime} (eventId: ${eventId})`);
               if (socket && socket.connected) {
-                socket.emit('video_seek', { 
-                  roomId, 
-                  currentTime, 
-                  initiatedBy: currentUser,
-                  eventId,
-                  timestamp: now
-                });
+              socket.emit('video_seek', { 
+                roomId, 
+                currentTime, 
+                initiatedBy: currentUser,
+                eventId,
+                timestamp: now
+              });
               } else {
                 console.warn('⚠️ Socket not connected, cannot emit video_seek');
               }
@@ -565,13 +565,13 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
           // For non-HLS videos, emit immediately
           console.log(`⏭️ User control: Emitting seek to time: ${currentTime.toFixed(2)}s (eventId: ${eventId})`);
           if (socket && socket.connected) {
-            socket.emit('video_seek', { 
-              roomId, 
-              currentTime, 
-              initiatedBy: currentUser,
-              eventId,
-              timestamp: now
-            });
+          socket.emit('video_seek', { 
+            roomId, 
+            currentTime, 
+            initiatedBy: currentUser,
+            eventId,
+            timestamp: now
+          });
           } else {
             console.warn('⚠️ Socket not connected, cannot emit video_seek');
           }
@@ -1826,12 +1826,12 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         if (playerState === window.YT.PlayerState.PLAYING) {
           // Emit current time to keep others in sync
           if (socket && socket.connected) {
-            socket.emit('video_play', {
-              roomId,
-              currentTime,
-              initiatedBy: currentUser,
-              isPeriodicSync: true
-            });
+          socket.emit('video_play', {
+            roomId,
+            currentTime,
+            initiatedBy: currentUser,
+            isPeriodicSync: true
+          });
           } else {
             console.warn('⚠️ Socket not connected, cannot emit periodic video_play');
           }
@@ -2034,11 +2034,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
     
     if (isPlaying) {
       if (socket && socket.connected) {
-        socket.emit('video_play', { roomId, currentTime });
-      } else {
+      socket.emit('video_play', { roomId, currentTime });
+    } else {
         console.warn('⚠️ Socket not connected, cannot emit video_play');
       }
-    } else {
+      } else {
       if (socket && socket.connected) {
         socket.emit('video_pause', { roomId, currentTime });
       } else {
@@ -2171,7 +2171,7 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
       // Emit seek event
       if (socket && roomId && !syncInProgress.current) {
         if (socket && socket.connected) {
-          socket.emit('video_seek', { roomId, currentTime: newTime, initiatedBy: currentUser });
+        socket.emit('video_seek', { roomId, currentTime: newTime, initiatedBy: currentUser });
         } else {
           console.warn('⚠️ Socket not connected, cannot emit video_seek');
         }
@@ -2826,9 +2826,9 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
                 <span>▶️</span>
                 <span>Manual Play</span>
               </button>
-            </div>
-          )}
-        </div>
+          </div>
+        )}
+      </div>
 
         {/* Load URL Button */}
         <div style={{ 

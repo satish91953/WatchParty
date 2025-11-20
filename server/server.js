@@ -755,15 +755,18 @@ io.on('connection', (socket) => {
     
     console.log(`User ${socket.id} joined voice chat in room ${roomId}`);
     
-    // Notify other users in voice chat that a new user joined
+    // Get list of existing voice chat users (excluding the joining user)
     const voiceChatUsers = Array.from(global.voiceChatUsers.get(roomId));
-    voiceChatUsers.forEach(userId => {
-      if (userId !== socket.id) {
-        io.to(userId).emit('new_user_joined_voice', {
-          userId: socket.id,
-          roomId
-        });
-      }
+    const existingUsers = voiceChatUsers.filter(userId => userId !== socket.id);
+    
+    // Notify other users in voice chat that a new user joined
+    // This allows existing users to create peer connections to the new user
+    // The new user will receive signals from existing users via 'user_joined_voice' event
+    existingUsers.forEach(userId => {
+      io.to(userId).emit('new_user_joined_voice', {
+        userId: socket.id,
+        roomId
+      });
     });
   });
   
@@ -823,6 +826,27 @@ io.on('connection', (socket) => {
       io.to(payload.userId).emit('retry_voice_connection', {
         requestingUserId: socket.id,
         roomId
+      });
+    }
+  });
+
+  // Handle request for existing voice signals (when a new user joins)
+  socket.on('request_existing_voice_signals', (data) => {
+    const connection = activeConnections.get(socket.id);
+    const roomId = data.roomId || (connection ? connection.roomId : null);
+    if (!roomId) return;
+    
+    // Get all existing voice chat users (excluding the requesting user)
+    if (global.voiceChatUsers.has(roomId)) {
+      const voiceChatUsers = Array.from(global.voiceChatUsers.get(roomId));
+      const existingUsers = voiceChatUsers.filter(userId => userId !== socket.id);
+      
+      // Notify each existing user to send their signal to the new user
+      existingUsers.forEach(existingUserId => {
+        io.to(existingUserId).emit('send_signal_to_user', {
+          targetUserId: socket.id,
+          roomId
+        });
       });
     }
   });
