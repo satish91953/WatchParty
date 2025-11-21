@@ -482,8 +482,8 @@ function App() {
         padding: window.innerWidth <= 768 ? '20px 16px' : '28px 36px',
         background: isDark 
           ? 'linear-gradient(135deg, rgba(102, 126, 234, 0.12) 0%, rgba(118, 75, 162, 0.12) 50%, rgba(240, 147, 251, 0.08) 100%)'
-          : '#dee2e6',
-        backgroundColor: isDark ? 'var(--bg-secondary)' : '#dee2e6',
+          : '#ffffff',
+        backgroundColor: isDark ? 'var(--bg-secondary)' : '#ffffff',
         borderRadius: window.innerWidth <= 768 ? '16px' : '24px',
         boxShadow: isDark 
           ? '0 4px 20px rgba(102, 126, 234, 0.1)' 
@@ -738,6 +738,14 @@ function App() {
 
           {/* Right Sidebar - Communication & Info */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            {/* Voice Chat */}
+            <VoiceChat 
+              socket={socket}
+              roomId={roomId}
+              currentUser={userId}
+              users={users}
+            />
+            
             {/* Room Status Panel */}
             {roomId && (
               <div className="component-card" style={{ marginBottom: 0 }}>
@@ -834,14 +842,6 @@ function App() {
                 </div>
               </div>
             )}
-            
-            {/* Voice Chat */}
-            <VoiceChat 
-              socket={socket}
-              roomId={roomId}
-              currentUser={userId}
-              users={users}
-            />
             
             {/* Participants Card */}
             <div className="component-card" style={{ marginBottom: 0 }}>
@@ -1080,6 +1080,15 @@ function App() {
           color: 'var(--text-primary)'
         }}>
           🎬 StreamTogether
+        </p>
+        <p style={{
+          margin: '0 0 12px 0',
+          fontSize: '14px',
+          fontWeight: '400',
+          color: 'var(--text-secondary)',
+          opacity: 0.8
+        }}>
+          Synchronized Screens, Live Voices, Shared Moments
         </p>
         <div style={{
           display: 'flex',

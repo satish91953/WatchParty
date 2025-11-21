@@ -94,20 +94,17 @@ body {
 body.theme-dark {
   background: #656570;
   background-image: 
-    linear-gradient(135deg, #656570 0%, #70707a 50%, #656570 100%);
+    linear-gradient(to right, #656570 0%, #858590 100%);
   background-attachment: fixed;
   background-size: 100% 100%;
 }
 
 body.theme-light {
+  background: #f5f5f5;
   background-image: 
-    radial-gradient(circle at 0% 0%, rgba(99, 102, 241, 0.08) 0%, transparent 50%),
-    radial-gradient(circle at 100% 0%, rgba(139, 92, 246, 0.08) 0%, transparent 50%),
-    radial-gradient(circle at 100% 100%, rgba(236, 72, 153, 0.06) 0%, transparent 50%),
-    radial-gradient(circle at 0% 100%, rgba(59, 130, 246, 0.06) 0%, transparent 50%),
-    linear-gradient(135deg, #f8f9fa 0%, #ffffff 50%, #f8f9fa 100%);
+    linear-gradient(to right, #f5f5f5 0%, #d0d0d5 100%);
   background-attachment: fixed;
-  background-size: 100% 100%, 100% 100%, 100% 100%, 100% 100%, 100% 100%;
+  background-size: 100% 100%;
 }
 
 body.theme-dark::before {

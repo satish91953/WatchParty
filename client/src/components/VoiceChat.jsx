@@ -887,11 +887,11 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
 
   return (
     <div {...cardStyle} style={{
+      marginBottom: 0,
       ...(noCard ? {
         background: 'transparent',
         border: 'none',
         boxShadow: 'none',
-        marginBottom: 0,
         padding: '20px'
       } : {})
     }}>

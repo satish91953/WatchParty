@@ -273,7 +273,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
             <button 
               type="submit"
               disabled={disabled}
-              className="btn-success touch-friendly"
+              className="btn-info touch-friendly"
               style={{ 
                 width: '100%',
                 padding: window.innerWidth <= 768 ? '16px' : '14px',
@@ -283,7 +283,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
                 touchAction: 'manipulation'
               }}
             >
-              🚀 Create Room
+               Create Room
             </button>
           </form>
           <p style={{ 
@@ -394,7 +394,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
                 touchAction: 'manipulation'
               }}
             >
-              🎭 Join Room
+               Join Room
             </button>
           </form>
           <p style={{ 
@@ -801,7 +801,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
               justifyContent: 'center',
               gap: '10px'
             }}>
-              <span style={{ fontSize: '28px' }}>👤</span>
+              <span style={{ fontSize: '28px' }}></span>
               Enter Your Name
             </h3>
             <p style={{
@@ -891,7 +891,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
                   borderRadius: '8px',
                   border: 'none',
                   background: pendingAction === 'create' 
-                    ? 'linear-gradient(135deg, #28a745, #20c997)'
+                    ? 'linear-gradient(135deg, #007bff, #0056b3)'
                     : 'linear-gradient(135deg, #007bff, #138496)',
                   color: 'white',
                   cursor: (!modalUsername.trim() || modalUsername.trim().startsWith('Guest-')) 

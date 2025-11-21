@@ -2246,17 +2246,11 @@ const VideoPlayer = forwardRef(({ socket, roomId, currentUser, initialVideo, isH
         borderRadius: '16px',
         overflow: 'hidden',
         marginBottom: '24px',
-        border: '3px solid var(--accent-color)',
+        border: '1px solid var(--border-color)',
         position: 'relative',
-        boxShadow: '0 8px 24px rgba(99, 102, 241, 0.3)',
+        boxShadow: 'none',
         transition: 'all 0.3s ease',
         touchAction: 'pan-y pinch-zoom'
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.boxShadow = '0 12px 32px rgba(99, 102, 241, 0.4)';
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.boxShadow = '0 8px 24px rgba(99, 102, 241, 0.3)';
       }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
