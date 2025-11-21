@@ -92,8 +92,9 @@ body {
 }
 
 body.theme-dark {
+  background: #656570;
   background-image: 
-    linear-gradient(135deg, #0a0a0f 0%, #1a1a1f 50%, #0a0a0f 100%);
+    linear-gradient(135deg, #656570 0%, #70707a 50%, #656570 100%);
   background-attachment: fixed;
   background-size: 100% 100%;
 }
