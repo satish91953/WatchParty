@@ -117,7 +117,28 @@ function App() {
         console.log('🔄 Auto-rejoining saved room:', savedRoomId, 'with username:', savedUsername);
         setStatus('Reconnecting to room...');
         
-        newSocket.emit('join_room', savedRoomId, { username: savedUsername.trim() }, (response) => {
+        // Check if it's a private room and get password from saved room data
+        const savedRoomData = localStorage.getItem('watchParty_roomData');
+        let joinData = { username: savedUsername.trim() };
+        
+        if (savedRoomData) {
+          try {
+            const roomData = JSON.parse(savedRoomData);
+            if (roomData.isPrivate) {
+              // For private rooms, we can't auto-rejoin without password
+              // Clear saved data and let user rejoin manually
+              console.log('⚠️ Cannot auto-rejoin private room without password');
+              localStorage.removeItem('watchParty_roomId');
+              localStorage.removeItem('watchParty_roomData');
+              setStatus('Connected to server! Please join the private room again with password.');
+              return;
+            }
+          } catch (e) {
+            console.warn('Error parsing saved room data:', e);
+          }
+        }
+        
+        newSocket.emit('join_room', savedRoomId, joinData, (response) => {
           if (response.success) {
             setRoomId(savedRoomId);
             setRoomData(response.room);
@@ -171,6 +192,25 @@ function App() {
       if (savedRoomId && savedUsername && savedUsername.trim() !== '' && !savedUsername.startsWith('Guest-')) {
         console.log('Rejoining room after reconnect:', savedRoomId);
         setStatus('Reconnecting to room...');
+        
+        // Check if it's a private room - can't auto-rejoin without password
+        const savedRoomData = localStorage.getItem('watchParty_roomData');
+        if (savedRoomData) {
+          try {
+            const roomData = JSON.parse(savedRoomData);
+            if (roomData.isPrivate) {
+              // For private rooms, we can't auto-rejoin without password
+              console.log('⚠️ Cannot auto-rejoin private room without password');
+              localStorage.removeItem('watchParty_roomId');
+              localStorage.removeItem('watchParty_roomData');
+              setStatus('Connected to server! Please join the private room again with password.');
+              return;
+            }
+          } catch (e) {
+            console.warn('Error parsing saved room data:', e);
+          }
+        }
+        
         newSocket.emit('join_room', savedRoomId, { username: savedUsername.trim() }, (response) => {
           if (response.success) {
             setRoomId(savedRoomId);
@@ -744,6 +784,7 @@ function App() {
               roomId={roomId}
               currentUser={userId}
               users={users}
+              roomData={roomData}
             />
             
             {/* Room Status Panel */}

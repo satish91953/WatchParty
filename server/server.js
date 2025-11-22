@@ -8,6 +8,7 @@ const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const bcrypt = require('bcryptjs');
 
 // Import models
 const Room = require('./models/Room');
@@ -281,13 +282,19 @@ io.on('connection', (socket) => {
         activeConnections.get(socket.id).username = username;
       }
       
+      // Hash password if private room
+      let hashedPassword = null;
+      if (data.isPrivate && data.password) {
+        hashedPassword = await bcrypt.hash(data.password.trim(), 10);
+      }
+      
       // Create room in database
       const room = new Room({
         roomId,
         name: data.roomName || 'Untitled Room',
         host: socket.userId,
         isPrivate: data.isPrivate || false,
-        password: data.isPrivate && data.password ? data.password.trim() : null,
+        password: hashedPassword,
         users: [{
           userId: socket.userId,
           username: username,
@@ -313,8 +320,10 @@ io.on('connection', (socket) => {
       // Return room with only active users
       const roomData = room.toObject();
       roomData.users = activeUsersInRoom;
+      // Remove password from response for security
+      delete roomData.password;
       
-      console.log(`Room ${roomId} created by ${username}`);
+      console.log(`Room ${roomId} created by ${username} (Private: ${room.isPrivate})`);
       callback({ 
         success: true, 
         roomId,
@@ -365,8 +374,8 @@ io.on('connection', (socket) => {
         pendingRoomDeletions.delete(roomId);
         console.log(`Cancelled pending deletion for room ${roomId} - user reconnecting`);
       }
-      
-      const room = await Room.findOne({ roomId, isActive: true });
+
+      const room = await Room.findOne({ roomId, isActive: true }).select('+password'); // Select password for verification
       
       if (!room) {
         if (actualCallback) actualCallback({ 
@@ -379,13 +388,40 @@ io.on('connection', (socket) => {
       // Check if room is private and verify password
       if (room.isPrivate) {
         const providedPassword = data?.password || '';
-        if (!providedPassword || providedPassword.trim() !== room.password) {
+        console.log(`🔒 Private room join attempt - Room: ${roomId}, Has password: ${!!providedPassword}, Room has password: ${!!room.password}`);
+        
+        if (!providedPassword) {
+          console.log(`❌ Private room join failed - No password provided`);
+          if (actualCallback) actualCallback({ 
+            success: false, 
+            message: 'This is a private room. Please provide a password.' 
+          });
+          return;
+        }
+        
+        if (!room.password) {
+          console.log(`❌ Private room join failed - Room has no password stored`);
+          if (actualCallback) actualCallback({ 
+            success: false, 
+            message: 'Room configuration error. Please contact support.' 
+          });
+          return;
+        }
+        
+        // Compare hashed password
+        const isPasswordValid = await bcrypt.compare(providedPassword.trim(), room.password);
+        console.log(`🔒 Password validation result: ${isPasswordValid}`);
+        
+        if (!isPasswordValid) {
+          console.log(`❌ Private room join failed - Incorrect password`);
           if (actualCallback) actualCallback({ 
             success: false, 
             message: 'Incorrect password. This is a private room.' 
           });
           return;
         }
+        
+        console.log(`✅ Private room password verified successfully`);
       }
       
       // Update active connection with the username
@@ -456,6 +492,8 @@ io.on('connection', (socket) => {
       // Return room with only active users
       const roomData = updatedRoom ? updatedRoom.toObject() : room.toObject();
       roomData.users = activeUsersInRoom;
+      // Remove password from response for security
+      delete roomData.password;
       
       if (actualCallback) {
         actualCallback({ 

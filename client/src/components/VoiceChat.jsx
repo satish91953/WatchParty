@@ -17,20 +17,42 @@ const loadPeer = async () => {
   return Peer;
 };
 
-function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerVolumesChange, onPeerMuteChange }) {
+function VoiceChat({ socket, roomId, currentUser, users, roomData, noCard = false, onPeerVolumesChange, onPeerMuteChange }) {
   const [audioEnabled, setAudioEnabled] = useState(false);
   const [micMuted, setMicMuted] = useState(false);
+  const [videoEnabled, setVideoEnabled] = useState(false);
+  const [videoMuted, setVideoMuted] = useState(false);
   const [volume, setVolume] = useState(100);
   const [audioStream, setAudioStream] = useState(null);
+  const [videoStream, setVideoStream] = useState(null);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [peerLoaded, setPeerLoaded] = useState(false);
   const [peerVolumes, setPeerVolumes] = useState({}); // Track volume per peer
+  const [peerVideoStreams, setPeerVideoStreams] = useState({}); // Track video streams per peer
+  const [videoSizes, setVideoSizes] = useState({}); // Track video frame sizes { local: {width, height}, peerId: {width, height} }
+  const [videoPositions, setVideoPositions] = useState({}); // Track video frame positions { local: {x, y}, peerId: {x, y} }
+  const [isResizing, setIsResizing] = useState(false);
+  const [resizeTarget, setResizeTarget] = useState(null);
+  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragTarget, setDragTarget] = useState(null);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   
   const peersRef = useRef([]);
   const volumeRef = useRef(100);
   const peerRetryTimers = useRef({});
   const peerConnectionTimeouts = useRef({});
   const peerVolumeRefs = useRef({}); // Store volume refs per peer
+  const videoRefs = useRef({}); // Store video element refs per peer
+  const localVideoRef = useRef(null); // Ref for local video element
+  const videoContainerRefs = useRef({}); // Store container refs for resizing
+  const dragPositionRef = useRef({ x: 0, y: 0 }); // Track position during drag to avoid flickering
+  const isDraggingRef = useRef(false); // Track dragging state via ref to avoid re-renders
+  const dragTargetRef = useRef(null); // Track drag target via ref
+  const dragStartRef = useRef({ x: 0, y: 0 }); // Track drag start offset via ref
+  
+  // Check if room is private (enables video chat)
+  const isPrivateRoom = roomData?.isPrivate || false;
 
   // Load Peer library on component mount
   useEffect(() => {
@@ -59,17 +81,50 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
     if (!audioEnabled) {
       try {
         setConnectionStatus('connecting');
-        const stream = await navigator.mediaDevices.getUserMedia({ 
+        
+        // Request media with video if private room
+        const mediaConstraints = {
           audio: {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
             sampleRate: 44100
-          } 
-        });
+          }
+        };
         
-        setAudioStream(stream);
-        setAudioEnabled(true);
+        // Add video for private rooms
+        if (isPrivateRoom) {
+          mediaConstraints.video = {
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+            facingMode: 'user'
+          };
+        }
+        
+        const stream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+        
+        // Separate audio and video streams
+        const audioTracks = stream.getAudioTracks();
+        const videoTracks = stream.getVideoTracks();
+        
+        // Store the combined stream (includes both audio and video tracks)
+        if (audioTracks.length > 0) {
+          setAudioStream(stream);
+          setAudioEnabled(true);
+        }
+        
+        if (videoTracks.length > 0 && isPrivateRoom) {
+          setVideoStream(stream); // Same stream object, includes both tracks
+          setVideoEnabled(true);
+          // Display local video
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = stream;
+          }
+        }
+        
+        // Note: The stream passed to peers will include both audio and video tracks
+        // when video is enabled, since it's the same MediaStream object
+        
         setConnectionStatus('connected');
         
         // Notify server that we're joining voice chat
@@ -123,6 +178,22 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
         // Notify server first that we're leaving voice chat
         if (socket && socket.connected) {
           socket.emit('leave_voice_chat', { roomId });
+        }
+        
+        // Stop video stream if enabled
+        if (videoStream) {
+          videoStream.getTracks().forEach(track => {
+            try {
+              track.stop();
+            } catch (e) {
+              console.warn('Error stopping video track:', e);
+            }
+          });
+          setVideoStream(null);
+          setVideoEnabled(false);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = null;
+          }
         }
         
         // First, remove all event listeners from peers
@@ -303,67 +374,69 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
           console.log('🎵 Received stream from peer:', userToSignal, remoteStream);
           console.log('Stream tracks:', remoteStream.getTracks().length);
           
-          // Remove existing audio element for this peer
-          const existingAudio = document.querySelector(`audio[data-peer-id="${userToSignal}"]`);
-          if (existingAudio) {
-            try {
-              if (existingAudio.srcObject) {
-                existingAudio.srcObject.getTracks().forEach(track => track.stop());
+          // Separate audio and video tracks
+          const audioTracks = remoteStream.getAudioTracks();
+          const videoTracks = remoteStream.getVideoTracks();
+          
+          // Handle audio
+          if (audioTracks.length > 0) {
+            // Remove existing audio element for this peer
+            const existingAudio = document.querySelector(`audio[data-peer-id="${userToSignal}"]`);
+            if (existingAudio) {
+              try {
+                if (existingAudio.srcObject) {
+                  existingAudio.srcObject.getTracks().forEach(track => track.stop());
+                }
+                existingAudio.remove();
+              } catch (e) {
+                console.warn('Error removing existing audio:', e);
               }
-              existingAudio.remove();
-            } catch (e) {
-              console.warn('Error removing existing audio:', e);
+            }
+
+            // Create an audio element for this peer
+            const audio = document.createElement('audio');
+            audio.srcObject = new MediaStream(audioTracks);
+            audio.autoplay = true;
+            audio.playsInline = true;
+            // Get volume for this specific peer (default 100)
+            const peerVolume = peerVolumeRefs.current[userToSignal] || 100;
+            audio.volume = peerVolume / 100;
+            audio.setAttribute('data-peer-id', userToSignal);
+            
+            // Ensure audio container exists
+            let audioContainer = document.getElementById('audio-container');
+            if (!audioContainer) {
+              audioContainer = document.createElement('div');
+              audioContainer.id = 'audio-container';
+              audioContainer.style.display = 'none';
+              document.body.appendChild(audioContainer);
+            }
+            
+            audioContainer.appendChild(audio);
+            
+            // Play the audio
+            const playPromise = audio.play();
+            if (playPromise !== undefined) {
+              playPromise
+                .then(() => {
+                  console.log('✅ Audio playing for peer:', userToSignal);
+                })
+                .catch(err => {
+                  console.error('❌ Error playing audio for peer:', userToSignal, err);
+                });
             }
           }
-
-          // Create an audio element for this peer
-          const audio = document.createElement('audio');
-          audio.srcObject = remoteStream;
-          audio.autoplay = true;
-          audio.playsInline = true;
-          // Get volume for this specific peer (default 100)
-          const peerVolume = peerVolumeRefs.current[userToSignal] || 100;
-          audio.volume = peerVolume / 100;
-          audio.setAttribute('data-peer-id', userToSignal);
           
-          // Ensure audio container exists
-          let audioContainer = document.getElementById('audio-container');
-          if (!audioContainer) {
-            audioContainer = document.createElement('div');
-            audioContainer.id = 'audio-container';
-            audioContainer.style.display = 'none';
-            document.body.appendChild(audioContainer);
-          }
-          
-          audioContainer.appendChild(audio);
-          
-          // Add event listeners for debugging
-          audio.addEventListener('loadedmetadata', () => {
-            console.log('✅ Audio metadata loaded for peer:', userToSignal);
-          });
-          
-          audio.addEventListener('play', () => {
-            console.log('▶️ Audio started playing for peer:', userToSignal);
-          });
-          
-          audio.addEventListener('error', (e) => {
-            console.error('❌ Audio error for peer:', userToSignal, e);
-          });
-          
-          // Play the audio
-          const playPromise = audio.play();
-          if (playPromise !== undefined) {
-            playPromise
-              .then(() => {
-                console.log('✅ Audio playing for peer:', userToSignal);
-              })
-              .catch(err => {
-                console.error('❌ Error playing audio for peer:', userToSignal, err);
-                // Try again after user interaction
-                document.addEventListener('click', () => {
-                  audio.play().catch(e => console.error('Still cannot play:', e));
-                }, { once: true });
-              });
+          // Handle video (for private rooms)
+          if (videoTracks.length > 0 && isPrivateRoom) {
+            console.log('📹 Received video stream from peer:', userToSignal, 'Video tracks:', videoTracks.length);
+            // Store video stream in state
+            const videoStream = new MediaStream(videoTracks);
+            setPeerVideoStreams(prev => {
+              const updated = { ...prev, [userToSignal]: videoStream };
+              console.log('📹 Updated peerVideoStreams:', Object.keys(updated));
+              return updated;
+            });
           }
         } catch (err) {
           console.error('Error handling stream:', err);
@@ -455,67 +528,69 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
           console.log('🎵 Received stream from peer:', callerID, remoteStream);
           console.log('Stream tracks:', remoteStream.getTracks().length);
           
-          // Remove existing audio element for this peer
-          const existingAudio = document.querySelector(`audio[data-peer-id="${callerID}"]`);
-          if (existingAudio) {
-            try {
-              if (existingAudio.srcObject) {
-                existingAudio.srcObject.getTracks().forEach(track => track.stop());
+          // Separate audio and video tracks
+          const audioTracks = remoteStream.getAudioTracks();
+          const videoTracks = remoteStream.getVideoTracks();
+          
+          // Handle audio
+          if (audioTracks.length > 0) {
+            // Remove existing audio element for this peer
+            const existingAudio = document.querySelector(`audio[data-peer-id="${callerID}"]`);
+            if (existingAudio) {
+              try {
+                if (existingAudio.srcObject) {
+                  existingAudio.srcObject.getTracks().forEach(track => track.stop());
+                }
+                existingAudio.remove();
+              } catch (e) {
+                console.warn('Error removing existing audio:', e);
               }
-              existingAudio.remove();
-            } catch (e) {
-              console.warn('Error removing existing audio:', e);
+            }
+
+            // Create an audio element for this peer
+            const audio = document.createElement('audio');
+            audio.srcObject = new MediaStream(audioTracks);
+            audio.autoplay = true;
+            audio.playsInline = true;
+            // Get volume for this specific peer (default 100)
+            const peerVolume = peerVolumeRefs.current[callerID] || 100;
+            audio.volume = peerVolume / 100;
+            audio.setAttribute('data-peer-id', callerID);
+            
+            // Ensure audio container exists
+            let audioContainer = document.getElementById('audio-container');
+            if (!audioContainer) {
+              audioContainer = document.createElement('div');
+              audioContainer.id = 'audio-container';
+              audioContainer.style.display = 'none';
+              document.body.appendChild(audioContainer);
+            }
+            
+            audioContainer.appendChild(audio);
+            
+            // Play the audio
+            const playPromise = audio.play();
+            if (playPromise !== undefined) {
+              playPromise
+                .then(() => {
+                  console.log('✅ Audio playing for peer:', callerID);
+                })
+                .catch(err => {
+                  console.error('❌ Error playing audio for peer:', callerID, err);
+                });
             }
           }
-
-          // Create an audio element for this peer
-          const audio = document.createElement('audio');
-          audio.srcObject = remoteStream;
-          audio.autoplay = true;
-          audio.playsInline = true;
-          // Get volume for this specific peer (default 100)
-          const peerVolume = peerVolumeRefs.current[callerID] || 100;
-          audio.volume = peerVolume / 100;
-          audio.setAttribute('data-peer-id', callerID);
           
-          // Ensure audio container exists
-          let audioContainer = document.getElementById('audio-container');
-          if (!audioContainer) {
-            audioContainer = document.createElement('div');
-            audioContainer.id = 'audio-container';
-            audioContainer.style.display = 'none';
-            document.body.appendChild(audioContainer);
-          }
-          
-          audioContainer.appendChild(audio);
-          
-          // Add event listeners for debugging
-          audio.addEventListener('loadedmetadata', () => {
-            console.log('✅ Audio metadata loaded for peer:', callerID);
-          });
-          
-          audio.addEventListener('play', () => {
-            console.log('▶️ Audio started playing for peer:', callerID);
-          });
-          
-          audio.addEventListener('error', (e) => {
-            console.error('❌ Audio error for peer:', callerID, e);
-          });
-          
-          // Play the audio
-          const playPromise = audio.play();
-          if (playPromise !== undefined) {
-            playPromise
-              .then(() => {
-                console.log('✅ Audio playing for peer:', callerID);
-              })
-              .catch(err => {
-                console.error('❌ Error playing audio for peer:', callerID, err);
-                // Try again after user interaction
-                document.addEventListener('click', () => {
-                  audio.play().catch(e => console.error('Still cannot play:', e));
-                }, { once: true });
-              });
+          // Handle video (for private rooms)
+          if (videoTracks.length > 0 && isPrivateRoom) {
+            console.log('📹 Received video stream from peer:', callerID, 'Video tracks:', videoTracks.length);
+            // Store video stream in state
+            const videoStream = new MediaStream(videoTracks);
+            setPeerVideoStreams(prev => {
+              const updated = { ...prev, [callerID]: videoStream };
+              console.log('📹 Updated peerVideoStreams:', Object.keys(updated));
+              return updated;
+            });
           }
         } catch (err) {
           console.error('Error handling stream:', err);
@@ -714,6 +789,28 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
         return updated;
       });
       
+      // Remove video stream for this peer
+      setPeerVideoStreams(prev => {
+        const updated = { ...prev };
+        delete updated[payload.userId];
+        console.log(`📹 Removed video stream for peer: ${payload.userId}`);
+        return updated;
+      });
+      
+      // Clean up video element
+      const videoElement = videoRefs.current[payload.userId];
+      if (videoElement) {
+        try {
+          if (videoElement.srcObject) {
+            videoElement.srcObject.getTracks().forEach(track => track.stop());
+          }
+          videoElement.srcObject = null;
+        } catch (e) {
+          console.warn('Error cleaning up video element:', e);
+        }
+        delete videoRefs.current[payload.userId];
+      }
+      
       // Notify parent component about peer mute status change
       if (onPeerMuteChange) {
         onPeerMuteChange(payload.userId, undefined);
@@ -784,6 +881,192 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
     }
   };
 
+  // Handle video toggle (for private rooms)
+  const toggleVideo = () => {
+    if (!isPrivateRoom) return;
+    
+    if (videoStream) {
+      const videoTrack = videoStream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        setVideoMuted(!videoTrack.enabled);
+      }
+    }
+  };
+
+  // Resize handlers
+  const handleResizeStart = (e, target) => {
+    e.preventDefault();
+    setIsResizing(true);
+    setResizeTarget(target);
+    
+    const container = videoContainerRefs.current[target];
+    if (container) {
+      const rect = container.getBoundingClientRect();
+      setResizeStart({
+        x: e.clientX,
+        y: e.clientY,
+        width: rect.width,
+        height: rect.height
+      });
+    }
+  };
+
+  const handleResizeMove = useCallback((e) => {
+    if (!isResizing || !resizeTarget) return;
+    
+    const deltaX = e.clientX - resizeStart.x;
+    const deltaY = e.clientY - resizeStart.y;
+    
+    const newWidth = Math.max(150, Math.min(800, resizeStart.width + deltaX));
+    const newHeight = Math.max(100, Math.min(600, resizeStart.height + deltaY));
+    
+    setVideoSizes(prev => ({
+      ...prev,
+      [resizeTarget]: { width: newWidth, height: newHeight }
+    }));
+  }, [isResizing, resizeTarget, resizeStart]);
+
+  const handleResizeEnd = useCallback(() => {
+    setIsResizing(false);
+    setResizeTarget(null);
+  }, []);
+
+  // Drag handlers - optimized to prevent flickering
+  const handleDragStart = (e, target) => {
+    // Don't start drag if clicking on resize handle
+    if (e.target.closest('.resize-handle')) return;
+    
+    e.preventDefault();
+    e.stopPropagation();
+    
+    const container = videoContainerRefs.current[target];
+    if (!container) return;
+    
+    // Update cursor immediately via DOM to avoid re-render
+    container.style.cursor = 'grabbing';
+    
+    const rect = container.getBoundingClientRect();
+    const currentPos = videoPositions[target];
+    
+    // If already positioned, use that position; otherwise use current rect position
+    const startX = currentPos ? currentPos.x : rect.left;
+    const startY = currentPos ? currentPos.y : rect.top;
+    
+    // Set refs immediately (no state update = no re-render)
+    isDraggingRef.current = true;
+    dragTargetRef.current = target;
+    
+    // Set state for UI updates (isDragging, dragTarget) - this will cause one re-render
+    setIsDragging(true);
+    setDragTarget(target);
+    
+    // Set initial position if not already set (switch to fixed positioning)
+    if (!currentPos) {
+      // Update DOM directly first
+      container.style.position = 'fixed';
+      container.style.left = `${rect.left}px`;
+      container.style.top = `${rect.top}px`;
+      
+      // Then update state (will cause re-render but position is already set)
+      setVideoPositions(prev => ({
+        ...prev,
+        [target]: { x: rect.left, y: rect.top }
+      }));
+    }
+    
+    // Calculate offset from mouse to element's top-left corner - store in ref
+    dragStartRef.current = {
+      x: e.clientX - startX,
+      y: e.clientY - startY
+    };
+    
+    // Also update state for initial render (only happens once)
+    setDragStart(dragStartRef.current);
+  };
+
+  const handleDragMove = useCallback((e) => {
+    // Use refs to check dragging state (no re-render trigger)
+    if (!isDraggingRef.current || !dragTargetRef.current) return;
+    
+    e.preventDefault();
+    
+    const target = dragTargetRef.current;
+    const container = videoContainerRefs.current[target];
+    if (!container) return;
+    
+    // Use ref for drag start (no state dependency)
+    const newX = e.clientX - dragStartRef.current.x;
+    const newY = e.clientY - dragStartRef.current.y;
+    
+    // Constrain to viewport
+    const width = videoSizes[target]?.width || 200;
+    const height = videoSizes[target]?.height || 150;
+    const maxX = window.innerWidth - width;
+    const maxY = window.innerHeight - height;
+    
+    const constrainedX = Math.max(0, Math.min(maxX, newX));
+    const constrainedY = Math.max(0, Math.min(maxY, newY));
+    
+    // Update ref for final position
+    dragPositionRef.current = { x: constrainedX, y: constrainedY };
+    
+    // Update DOM directly - NO state update during drag (prevents flickering)
+    container.style.left = `${constrainedX}px`;
+    container.style.top = `${constrainedY}px`;
+    container.style.transform = 'translateZ(0)'; // Force GPU acceleration
+  }, [videoSizes]);
+
+  const handleDragEnd = useCallback(() => {
+    const target = dragTargetRef.current;
+    
+    if (target) {
+      const container = videoContainerRefs.current[target];
+      if (container) {
+        // Reset cursor via DOM to avoid re-render
+        container.style.cursor = 'grab';
+        container.style.transform = ''; // Remove transform
+      }
+      
+      // Update refs first
+      isDraggingRef.current = false;
+      dragTargetRef.current = null;
+      
+      // Now update state (will cause re-render but drag is done)
+      setVideoPositions(prev => ({
+        ...prev,
+        [target]: dragPositionRef.current
+      }));
+    }
+    
+    // Update state for UI
+    setIsDragging(false);
+    setDragTarget(null);
+  }, []);
+
+  // Add global mouse event listeners for resizing and dragging
+  useEffect(() => {
+    if (isResizing) {
+      document.addEventListener('mousemove', handleResizeMove);
+      document.addEventListener('mouseup', handleResizeEnd);
+      return () => {
+        document.removeEventListener('mousemove', handleResizeMove);
+        document.removeEventListener('mouseup', handleResizeEnd);
+      };
+    }
+  }, [isResizing, handleResizeMove, handleResizeEnd]);
+
+  useEffect(() => {
+    if (isDragging) {
+      document.addEventListener('mousemove', handleDragMove);
+      document.addEventListener('mouseup', handleDragEnd);
+      return () => {
+        document.removeEventListener('mousemove', handleDragMove);
+        document.removeEventListener('mouseup', handleDragEnd);
+      };
+    }
+  }, [isDragging, handleDragMove, handleDragEnd]);
+
 
   // Handle volume change for a specific peer - used by App.js Participants section
   const handlePeerVolumeChange = (peerId, newVolume) => {
@@ -806,6 +1089,51 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
       onPeerVolumesChange(handlePeerVolumeChange);
     }
   }, [onPeerVolumesChange]);
+
+  // Update local video when stream is available
+  useEffect(() => {
+    if (videoStream && localVideoRef.current) {
+      localVideoRef.current.srcObject = videoStream;
+      console.log('📹 Local video stream assigned to video element');
+      
+      // Ensure video plays
+      const playPromise = localVideoRef.current.play();
+      if (playPromise !== undefined) {
+        playPromise
+          .then(() => {
+            console.log('✅ Local video playing');
+          })
+          .catch(err => {
+            console.error('❌ Error playing local video:', err);
+          });
+      }
+    } else if (localVideoRef.current && !videoStream) {
+      localVideoRef.current.srcObject = null;
+    }
+  }, [videoStream, videoMuted]);
+
+  // Update remote video elements when streams are received
+  useEffect(() => {
+    Object.entries(peerVideoStreams).forEach(([peerId, stream]) => {
+      const videoElement = videoRefs.current[peerId];
+      if (videoElement && stream) {
+        console.log(`📹 Assigning video stream to element for peer: ${peerId}`);
+        videoElement.srcObject = stream;
+        
+        // Ensure video plays
+        const playPromise = videoElement.play();
+        if (playPromise !== undefined) {
+          playPromise
+            .then(() => {
+              console.log(`✅ Remote video playing for peer: ${peerId}`);
+            })
+            .catch(err => {
+              console.error(`❌ Error playing remote video for peer ${peerId}:`, err);
+            });
+        }
+      }
+    });
+  }, [peerVideoStreams]);
 
   // Update volume for all audio elements when volume changes
   useEffect(() => {
@@ -902,7 +1230,9 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
           alignItems: 'center',
           marginBottom: '20px'
         }}>
-          <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '700' }}>🎤 Voice Chat</h3>
+          <h3 style={{ margin: 0, fontSize: '18px', fontWeight: '700' }}>
+            {isPrivateRoom ? '🎥 Voice + Video Chat' : '🎤 Voice Chat'}
+          </h3>
           <span style={{
             padding: '6px 14px',
             background: 'var(--bg-tertiary)',
@@ -955,36 +1285,325 @@ function VoiceChat({ socket, roomId, currentUser, users, noCard = false, onPeerV
         </button>
 
         {audioEnabled && (
-          <button
-            onClick={toggleMute}
-            style={{
-              background: micMuted 
-                ? 'linear-gradient(135deg, #ffc107, #ff9800)' 
-                : 'linear-gradient(135deg, #17a2b8, #138496)',
-              color: micMuted ? '#212529' : 'white',
-              minWidth: '160px',
-              padding: '12px 20px',
-              fontSize: '15px',
-              fontWeight: '700',
-              borderRadius: '8px',
-              border: 'none',
-              cursor: 'pointer',
-              boxShadow: '0 4px 12px rgba(0, 0, 0, 0.2)',
-              transition: 'all 0.3s ease'
-            }}
-            onMouseEnter={(e) => {
-              e.target.style.transform = 'translateY(-2px)';
-              e.target.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.3)';
-            }}
-            onMouseLeave={(e) => {
-              e.target.style.transform = 'translateY(0)';
-              e.target.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.2)';
-            }}
-          >
-            {micMuted ? '🔇 Unmute' : '🔊 Mute'}
-          </button>
+          <>
+            <button
+              onClick={toggleMute}
+              style={{
+                background: micMuted 
+                  ? 'linear-gradient(135deg, #ffc107, #ff9800)' 
+                  : 'linear-gradient(135deg, #17a2b8, #138496)',
+                color: micMuted ? '#212529' : 'white',
+                minWidth: '160px',
+                padding: '12px 20px',
+                fontSize: '15px',
+                fontWeight: '700',
+                borderRadius: '8px',
+                border: 'none',
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.2)',
+                transition: 'all 0.3s ease'
+              }}
+              onMouseEnter={(e) => {
+                e.target.style.transform = 'translateY(-2px)';
+                e.target.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.3)';
+              }}
+              onMouseLeave={(e) => {
+                e.target.style.transform = 'translateY(0)';
+                e.target.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.2)';
+              }}
+            >
+              {micMuted ? '🔇 Unmute' : '🔊 Mute'}
+            </button>
+            
+            {isPrivateRoom && videoEnabled && (
+              <button
+                onClick={toggleVideo}
+                style={{
+                  background: videoMuted 
+                    ? 'linear-gradient(135deg, #ffc107, #ff9800)' 
+                    : 'linear-gradient(135deg, #9333ea, #7e22ce)',
+                  color: videoMuted ? '#212529' : 'white',
+                  minWidth: '160px',
+                  padding: '12px 20px',
+                  fontSize: '15px',
+                  fontWeight: '700',
+                  borderRadius: '8px',
+                  border: 'none',
+                  cursor: 'pointer',
+                  boxShadow: '0 4px 12px rgba(0, 0, 0, 0.2)',
+                  transition: 'all 0.3s ease'
+                }}
+                onMouseEnter={(e) => {
+                  e.target.style.transform = 'translateY(-2px)';
+                  e.target.style.boxShadow = '0 6px 16px rgba(0, 0, 0, 0.3)';
+                }}
+                onMouseLeave={(e) => {
+                  e.target.style.transform = 'translateY(0)';
+                  e.target.style.boxShadow = '0 4px 12px rgba(0, 0, 0, 0.2)';
+                }}
+              >
+                {videoMuted ? '📹 Show Video' : '📹 Hide Video'}
+              </button>
+            )}
+          </>
         )}
       </div>
+
+      {/* Video Grid for Private Rooms */}
+      {isPrivateRoom && videoEnabled && (
+        <div style={{
+          marginTop: '20px',
+          marginBottom: '20px',
+          position: 'relative',
+          minHeight: '200px'
+        }}>
+          <h4 style={{
+            margin: '0 0 12px 0',
+            fontSize: '14px',
+            fontWeight: '600',
+            color: 'var(--text-secondary)'
+          }}>
+            Video Chat
+          </h4>
+          
+          {/* Local Video */}
+          {videoStream && (
+            <div 
+              ref={(el) => { if (el) videoContainerRefs.current['local'] = el; }}
+              onMouseDown={(e) => handleDragStart(e, 'local')}
+              className={isDragging && dragTarget === 'local' ? 'dragging' : ''}
+              style={{
+                marginBottom: videoPositions['local'] ? '0' : '12px',
+                borderRadius: '8px',
+                overflow: 'hidden',
+                background: '#000',
+                position: videoPositions['local'] ? 'fixed' : 'relative',
+                cursor: isResizing && resizeTarget === 'local' ? 'nwse-resize' : 'grab',
+                width: videoSizes['local']?.width || '200px',
+                height: videoSizes['local']?.height || '150px',
+                minWidth: '150px',
+                minHeight: '100px',
+                maxWidth: '800px',
+                maxHeight: '600px',
+                opacity: videoMuted ? 0.3 : 1,
+                left: (isDraggingRef.current && dragTargetRef.current === 'local') 
+                  ? undefined // Let DOM handle it during drag
+                  : (videoPositions['local'] ? `${videoPositions['local'].x}px` : 'auto'),
+                top: (isDraggingRef.current && dragTargetRef.current === 'local')
+                  ? undefined // Let DOM handle it during drag
+                  : (videoPositions['local'] ? `${videoPositions['local'].y}px` : 'auto'),
+                zIndex: (isDragging && dragTarget === 'local') ? 1000 : (videoPositions['local'] ? 100 : 10),
+                boxShadow: videoPositions['local'] ? '0 4px 20px rgba(0, 0, 0, 0.3)' : 'none',
+                userSelect: 'none',
+                willChange: isDragging && dragTarget === 'local' ? 'transform' : 'auto',
+                transition: isDragging && dragTarget === 'local' ? 'none' : 'box-shadow 0.2s ease',
+                pointerEvents: 'auto',
+                WebkitUserSelect: 'none',
+                MozUserSelect: 'none',
+                msUserSelect: 'none'
+              }}
+              onMouseEnter={(e) => {
+                if (!isDraggingRef.current && !isResizing) {
+                  e.currentTarget.style.cursor = 'grab';
+                }
+              }}
+              onMouseLeave={(e) => {
+                if (!isDraggingRef.current && !isResizing) {
+                  e.currentTarget.style.cursor = 'default';
+                }
+              }}
+            >
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                draggable={false}
+                onDragStart={(e) => e.preventDefault()}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  display: 'block',
+                  objectFit: 'cover',
+                  pointerEvents: 'none',
+                  userSelect: 'none'
+                }}
+              />
+              <div style={{
+                position: 'absolute',
+                bottom: '8px',
+                left: '8px',
+                background: 'rgba(0, 0, 0, 0.7)',
+                color: 'white',
+                padding: '4px 8px',
+                borderRadius: '4px',
+                fontSize: '12px',
+                fontWeight: '600'
+              }}>
+                You
+              </div>
+              {/* Resize Handle */}
+              <div
+                className="resize-handle"
+                onMouseDown={(e) => {
+                  e.stopPropagation();
+                  handleResizeStart(e, 'local');
+                }}
+                style={{
+                  position: 'absolute',
+                  bottom: '0',
+                  right: '0',
+                  width: '20px',
+                  height: '20px',
+                  background: 'rgba(99, 102, 241, 0.8)',
+                  cursor: 'nwse-resize',
+                  borderTopLeftRadius: '8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 11
+                }}
+              >
+                <div style={{
+                  width: '0',
+                  height: '0',
+                  borderLeft: '8px solid transparent',
+                  borderBottom: '8px solid white',
+                  transform: 'rotate(45deg)',
+                  marginBottom: '2px',
+                  marginRight: '2px'
+                }}></div>
+              </div>
+            </div>
+          )}
+          
+          {/* Remote Video Streams */}
+          {Object.entries(peerVideoStreams).map(([peerId, stream]) => {
+            // Try to find user by userId or socketId
+            const user = users.find(u => u.userId === peerId || u.socketId === peerId) || 
+                        users.find(u => u.userId?.includes(peerId) || peerId?.includes(u.userId)) ||
+                        { username: 'User' };
+            console.log(`📹 Rendering video for peerId: ${peerId}, user:`, user);
+            return (
+              <div
+                key={peerId}
+                ref={(el) => { if (el) videoContainerRefs.current[peerId] = el; }}
+                onMouseDown={(e) => handleDragStart(e, peerId)}
+                className={isDragging && dragTarget === peerId ? 'dragging' : ''}
+                style={{
+                  borderRadius: '8px',
+                  overflow: 'hidden',
+                  background: '#000',
+                  position: videoPositions[peerId] ? 'fixed' : 'relative',
+                  cursor: isResizing && resizeTarget === peerId ? 'nwse-resize' : 'grab',
+                  width: videoSizes[peerId]?.width || '200px',
+                  height: videoSizes[peerId]?.height || '150px',
+                  minWidth: '150px',
+                  minHeight: '100px',
+                  maxWidth: '800px',
+                  maxHeight: '600px',
+                  left: (isDraggingRef.current && dragTargetRef.current === peerId)
+                    ? undefined // Let DOM handle it during drag
+                    : (videoPositions[peerId] ? `${videoPositions[peerId].x}px` : 'auto'),
+                  top: (isDraggingRef.current && dragTargetRef.current === peerId)
+                    ? undefined // Let DOM handle it during drag
+                    : (videoPositions[peerId] ? `${videoPositions[peerId].y}px` : 'auto'),
+                  zIndex: (isDragging && dragTarget === peerId) ? 1000 : (videoPositions[peerId] ? 100 : 10),
+                  boxShadow: videoPositions[peerId] ? '0 4px 20px rgba(0, 0, 0, 0.3)' : 'none',
+                  userSelect: 'none',
+                  marginBottom: videoPositions[peerId] ? '0' : '12px',
+                  willChange: isDragging && dragTarget === peerId ? 'transform' : 'auto',
+                  transition: isDragging && dragTarget === peerId ? 'none' : 'box-shadow 0.2s ease',
+                  pointerEvents: 'auto',
+                  WebkitUserSelect: 'none',
+                  MozUserSelect: 'none',
+                  msUserSelect: 'none'
+                }}
+                onMouseEnter={(e) => {
+                  if (!isDraggingRef.current && !isResizing) {
+                    e.currentTarget.style.cursor = 'grab';
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  if (!isDraggingRef.current && !isResizing) {
+                    e.currentTarget.style.cursor = 'default';
+                  }
+                }}
+              >
+                  <video
+                    ref={(el) => {
+                      if (el) {
+                        videoRefs.current[peerId] = el;
+                        // Assign stream if available
+                        if (stream) {
+                          el.srcObject = stream;
+                          el.play().catch(err => console.error('Error playing video:', err));
+                        }
+                      }
+                    }}
+                    autoPlay
+                    playsInline
+                    draggable={false}
+                    onDragStart={(e) => e.preventDefault()}
+                    style={{
+                      width: '100%',
+                      height: '100%',
+                      display: 'block',
+                      objectFit: 'cover',
+                      pointerEvents: 'none',
+                      userSelect: 'none'
+                    }}
+                  />
+                  <div style={{
+                    position: 'absolute',
+                    bottom: '8px',
+                    left: '8px',
+                    background: 'rgba(0, 0, 0, 0.7)',
+                    color: 'white',
+                    padding: '4px 8px',
+                    borderRadius: '4px',
+                    fontSize: '12px',
+                    fontWeight: '600'
+                  }}>
+                    {user.username || 'User'}
+                  </div>
+                  {/* Resize Handle */}
+                  <div
+                    className="resize-handle"
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      handleResizeStart(e, peerId);
+                    }}
+                    style={{
+                      position: 'absolute',
+                      bottom: '0',
+                      right: '0',
+                      width: '20px',
+                      height: '20px',
+                      background: 'rgba(99, 102, 241, 0.8)',
+                      cursor: 'nwse-resize',
+                      borderTopLeftRadius: '8px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      zIndex: 11
+                    }}
+                  >
+                    <div style={{
+                      width: '0',
+                      height: '0',
+                      borderLeft: '8px solid transparent',
+                      borderBottom: '8px solid white',
+                      transform: 'rotate(45deg)',
+                      marginBottom: '2px',
+                      marginRight: '2px'
+                    }}></div>
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+      )}
 
       {/* Hidden container for audio elements */}
       <div id="audio-container" style={{ display: 'none' }}></div>

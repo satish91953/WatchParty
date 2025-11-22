@@ -104,7 +104,8 @@ const roomSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    default: null
+    default: null,
+    select: false // Don't return password by default
   }
 });
 

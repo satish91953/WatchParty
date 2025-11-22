@@ -420,9 +420,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          height: '100%',
-          opacity: 0.6,
-          pointerEvents: 'none'
+          height: '100%'
         }}
         >
           <div style={{
@@ -454,7 +452,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
               placeholder="ROOM NAME (OPTIONAL)"
               value={privateRoomName}
               onChange={(e) => setPrivateRoomName(e.target.value.toUpperCase())}
-              disabled={true}
+              disabled={disabled}
               style={{ 
                 width: '100%', 
                 marginBottom: '12px',
@@ -478,7 +476,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
               placeholder="PASSWORD (REQUIRED)"
               value={privateRoomPassword}
               onChange={(e) => setPrivateRoomPassword(e.target.value)}
-              disabled={true}
+              disabled={disabled}
               style={{ 
                 width: '100%', 
                 marginBottom: '18px',
@@ -504,7 +502,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
             />
             <button 
               type="submit"
-              disabled={true}
+              disabled={disabled || !privateRoomPassword.trim()}
               className="btn-success touch-friendly"
               style={{ 
                 width: '100%',
@@ -529,58 +527,8 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
             textAlign: 'center',
             lineHeight: '1.5'
           }}>
-            Create a password-protected room for private watch parties
+            Create a password-protected room for private watch parties with video+voice chat
           </p>
-          {/* Overlay Message */}
-          <div style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'rgba(0, 0, 0, 0.8)',
-            borderRadius: '16px',
-            zIndex: 10,
-            pointerEvents: 'auto',
-            backdropFilter: 'blur(2px)'
-          }}>
-            <div style={{
-              background: 'var(--bg-primary)',
-              padding: '32px 40px',
-              borderRadius: '16px',
-              border: '3px solid var(--accent-color)',
-              textAlign: 'center',
-              boxShadow: '0 12px 32px rgba(0, 0, 0, 0.5)',
-              maxWidth: '90%',
-              minWidth: '280px'
-            }}>
-              <div style={{
-                fontSize: '48px',
-                marginBottom: '16px',
-                lineHeight: '1'
-              }}>🔒</div>
-              <div style={{
-                fontSize: '20px',
-                fontWeight: '700',
-                color: 'var(--text-primary)',
-                marginBottom: '12px',
-                lineHeight: '1.4'
-              }}>
-                We are working on Private Rooms
-              </div>
-              <div style={{
-                fontSize: '15px',
-                color: 'var(--text-secondary)',
-                lineHeight: '1.5',
-                fontWeight: '500'
-              }}>
-                This feature will be available soon!
-              </div>
-            </div>
-          </div>
         </div>
 
         {/* Join Private Room Section */}
@@ -595,9 +543,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          height: '100%',
-          opacity: 0.6,
-          pointerEvents: 'none'
+          height: '100%'
         }}
         >
           <div style={{
@@ -629,7 +575,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
               placeholder="ENTER ROOM CODE..."
               value={joinPrivateRoomId}
               onChange={(e) => setJoinPrivateRoomId(e.target.value.toUpperCase())}
-              disabled={true}
+              disabled={disabled}
               style={{ 
                 width: '100%', 
                 marginBottom: '12px',
@@ -654,7 +600,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
               placeholder="ENTER PASSWORD..."
               value={joinPrivateRoomPassword}
               onChange={(e) => setJoinPrivateRoomPassword(e.target.value)}
-              disabled={true}
+              disabled={disabled}
               style={{ 
                 width: '100%', 
                 marginBottom: '18px',
@@ -680,7 +626,7 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
             />
             <button 
               type="submit"
-              disabled={true}
+              disabled={disabled || !joinPrivateRoomId.trim() || !joinPrivateRoomPassword.trim()}
               className="btn-info touch-friendly"
               style={{ 
                 width: '100%',
@@ -705,58 +651,8 @@ function RoomControls({ onCreateRoom, onJoinRoom, onCreatePrivateRoom, onJoinPri
             textAlign: 'center',
             lineHeight: '1.5'
           }}>
-            Enter the room code and password to join a private room
+            Enter the room code and password to join a private room with video+voice chat
           </p>
-          {/* Overlay Message */}
-          <div style={{
-            position: 'absolute',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            background: 'rgba(0, 0, 0, 0.8)',
-            borderRadius: '16px',
-            zIndex: 10,
-            pointerEvents: 'auto',
-            backdropFilter: 'blur(2px)'
-          }}>
-            <div style={{
-              background: 'var(--bg-primary)',
-              padding: '32px 40px',
-              borderRadius: '16px',
-              border: '3px solid var(--accent-color)',
-              textAlign: 'center',
-              boxShadow: '0 12px 32px rgba(0, 0, 0, 0.5)',
-              maxWidth: '90%',
-              minWidth: '280px'
-            }}>
-              <div style={{
-                fontSize: '48px',
-                marginBottom: '16px',
-                lineHeight: '1'
-              }}>🔒</div>
-              <div style={{
-                fontSize: '20px',
-                fontWeight: '700',
-                color: 'var(--text-primary)',
-                marginBottom: '12px',
-                lineHeight: '1.4'
-              }}>
-                We are working on Private Rooms
-              </div>
-              <div style={{
-                fontSize: '15px',
-                color: 'var(--text-secondary)',
-                lineHeight: '1.5',
-                fontWeight: '500'
-              }}>
-                This feature will be available soon!
-              </div>
-            </div>
-          </div>
         </div>
       </div>
 
