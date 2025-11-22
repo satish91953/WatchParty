@@ -1265,8 +1265,9 @@ function VoiceChat({ socket, roomId, currentUser, users, roomData, noCard = fals
       
       <div style={{ 
         display: 'flex', 
+        flexDirection: window.innerWidth <= 768 ? 'column' : 'row',
         gap: '12px', 
-        alignItems: 'center', 
+        alignItems: 'stretch', 
         marginBottom: '20px', 
         flexWrap: 'wrap' 
       }}>
@@ -1274,10 +1275,12 @@ function VoiceChat({ socket, roomId, currentUser, users, roomData, noCard = fals
           onClick={toggleVoiceChat}
           className={audioEnabled ? 'btn-danger' : 'btn-success'}
           style={{ 
-            minWidth: '160px',
-            padding: '12px 20px',
-            fontSize: '15px',
-            fontWeight: '700'
+            minWidth: window.innerWidth <= 768 ? '100%' : '160px',
+            width: window.innerWidth <= 768 ? '100%' : 'auto',
+            padding: window.innerWidth <= 768 ? '14px 20px' : '12px 20px',
+            fontSize: window.innerWidth <= 768 ? '16px' : '15px',
+            fontWeight: '700',
+            minHeight: window.innerWidth <= 768 ? '48px' : 'auto'
           }}
           disabled={!peerLoaded}
         >
@@ -1293,10 +1296,12 @@ function VoiceChat({ socket, roomId, currentUser, users, roomData, noCard = fals
                   ? 'linear-gradient(135deg, #ffc107, #ff9800)' 
                   : 'linear-gradient(135deg, #17a2b8, #138496)',
                 color: micMuted ? '#212529' : 'white',
-                minWidth: '160px',
-                padding: '12px 20px',
-                fontSize: '15px',
+                minWidth: window.innerWidth <= 768 ? '100%' : '160px',
+                width: window.innerWidth <= 768 ? '100%' : 'auto',
+                padding: window.innerWidth <= 768 ? '14px 20px' : '12px 20px',
+                fontSize: window.innerWidth <= 768 ? '16px' : '15px',
                 fontWeight: '700',
+                minHeight: window.innerWidth <= 768 ? '48px' : 'auto',
                 borderRadius: '8px',
                 border: 'none',
                 cursor: 'pointer',
@@ -1323,10 +1328,12 @@ function VoiceChat({ socket, roomId, currentUser, users, roomData, noCard = fals
                     ? 'linear-gradient(135deg, #ffc107, #ff9800)' 
                     : 'linear-gradient(135deg, #9333ea, #7e22ce)',
                   color: videoMuted ? '#212529' : 'white',
-                  minWidth: '160px',
-                  padding: '12px 20px',
-                  fontSize: '15px',
+                  minWidth: window.innerWidth <= 768 ? '100%' : '160px',
+                  width: window.innerWidth <= 768 ? '100%' : 'auto',
+                  padding: window.innerWidth <= 768 ? '14px 20px' : '12px 20px',
+                  fontSize: window.innerWidth <= 768 ? '16px' : '15px',
                   fontWeight: '700',
+                  minHeight: window.innerWidth <= 768 ? '48px' : 'auto',
                   borderRadius: '8px',
                   border: 'none',
                   cursor: 'pointer',
@@ -1379,12 +1386,12 @@ function VoiceChat({ socket, roomId, currentUser, users, roomData, noCard = fals
                 background: '#000',
                 position: videoPositions['local'] ? 'fixed' : 'relative',
                 cursor: isResizing && resizeTarget === 'local' ? 'nwse-resize' : 'grab',
-                width: videoSizes['local']?.width || '200px',
-                height: videoSizes['local']?.height || '150px',
-                minWidth: '150px',
-                minHeight: '100px',
-                maxWidth: '800px',
-                maxHeight: '600px',
+                width: videoSizes['local']?.width || (window.innerWidth <= 768 ? '100%' : '200px'),
+                height: videoSizes['local']?.height || (window.innerWidth <= 768 ? 'auto' : '150px'),
+                minWidth: window.innerWidth <= 768 ? '100%' : '150px',
+                minHeight: window.innerWidth <= 768 ? '120px' : '100px',
+                maxWidth: window.innerWidth <= 768 ? '100%' : '800px',
+                maxHeight: window.innerWidth <= 768 ? '400px' : '600px',
                 opacity: videoMuted ? 0.3 : 1,
                 left: (isDraggingRef.current && dragTargetRef.current === 'local') 
                   ? undefined // Let DOM handle it during drag
@@ -1496,12 +1503,12 @@ function VoiceChat({ socket, roomId, currentUser, users, roomData, noCard = fals
                   background: '#000',
                   position: videoPositions[peerId] ? 'fixed' : 'relative',
                   cursor: isResizing && resizeTarget === peerId ? 'nwse-resize' : 'grab',
-                  width: videoSizes[peerId]?.width || '200px',
-                  height: videoSizes[peerId]?.height || '150px',
-                  minWidth: '150px',
-                  minHeight: '100px',
-                  maxWidth: '800px',
-                  maxHeight: '600px',
+                  width: videoSizes[peerId]?.width || (window.innerWidth <= 768 ? '100%' : '200px'),
+                  height: videoSizes[peerId]?.height || (window.innerWidth <= 768 ? 'auto' : '150px'),
+                  minWidth: window.innerWidth <= 768 ? '100%' : '150px',
+                  minHeight: window.innerWidth <= 768 ? '120px' : '100px',
+                  maxWidth: window.innerWidth <= 768 ? '100%' : '800px',
+                  maxHeight: window.innerWidth <= 768 ? '400px' : '600px',
                   left: (isDraggingRef.current && dragTargetRef.current === peerId)
                     ? undefined // Let DOM handle it during drag
                     : (videoPositions[peerId] ? `${videoPositions[peerId].x}px` : 'auto'),
